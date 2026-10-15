@@ -1,0 +1,32 @@
+# ---- dependencies ----
+node_modules/
+
+# ---- Web 原版参考副本 ----
+# 必须写成 /src/ （锚定仓库根）。写成 src/ 会匹配任意层级的同名目录，
+# 把 app/src/ 和 app/src-tauri/src/ 一起排掉——整个前端和 Rust 源码就没了。
+# /src/ 是 1to3fall5/skyflow-designer 的干净克隆（自带 .git），历史已在远端，
+# 这里不重复收录。需要对照时进 src/ 单独 pull。
+/src/
+
+# ---- build output ----
+app/dist/
+app/src-tauri/target/
+app/src-tauri/gen/schemas/
+
+# ---- packaged binaries (use GitHub Releases instead) ----
+*.exe
+*.msi
+*.deb
+*.rpm
+*.AppImage
+*.dmg
+
+# ---- local editor / OS noise ----
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/
+
+# ---- WorkBuddy agent working data (session logs, local memory) ----
+.workbuddy/
