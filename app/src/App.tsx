@@ -743,12 +743,17 @@ export default function App() {
                 title={`${meta.label} · ${l.name}`}
                 onClick={async () => { setState(await api.setActive(l.id)); }}
               >
-                {/* The eye sits in its own fixed column so every eye in the
-                    list lines up, which is the whole reason the column reads
-                    as a column. */}
-                <button className="eye" title={l.visible ? '隐藏图层' : '显示图层'}
+                {/* The visibility column sits in its own fixed width so every
+                    glyph lines up down the list, which is the whole reason the
+                    column reads as a column. PS shows an eye for a visible
+                    layer and a hollow square for a hidden one — scanning a
+                    column of eyes against boxes answers "which of these are
+                    on" without reading a single row. */}
+                <button className={`eye ${l.visible ? 'shown' : ''}`}
+                  title={l.visible ? '隐藏图层' : '显示图层'}
+                  aria-label={l.visible ? '隐藏图层' : '显示图层'}
                   onClick={(e) => { e.stopPropagation(); updateLayer(l.id, { visible: !l.visible }); }}>
-                  <ToolIcon name={l.visible ? 'eye' : 'eye-off'} size={14} />
+                  <ToolIcon name={l.visible ? 'eye' : 'sq'} size={15} />
                 </button>
 
                 {/* Thumbnail of the layer's own pixels, on a checkerboard when

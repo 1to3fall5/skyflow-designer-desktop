@@ -81,16 +81,19 @@ const PATHS: Record<string, string[]> = {
   up: ['m18 15-6-6-6 6'],
   down: ['m6 9 6 6 6-6'],
   right: ['m9 18 6-6-6-6'],
-  // lucide:eye / eye-off. Hand-drawn from the same primitives rather than
-  // copied, so the two are guaranteed to share an outline.
+  // Layer visibility. Photoshop's two states for the eye column are an **eye**
+  // and a **hollow square** — not an eye and a struck-through eye. A
+  // struck-through glyph is one shape you have to decode per row; eyes against
+  // boxes is a column you can scan straight down.
+  //
+  // Hand-drawn from the same primitives rather than copied, so the two are
+  // guaranteed to sit on the same optical size.
   eye: [
     'M2 12c2.2-3.8 5.7-7 10-7s7.8 3.2 10 7c-2.2 3.8-5.7 7-10 7s-7.8-3.2-10-7z',
     'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
   ],
-  'eye-off': [
-    'M2 12c2.2-3.8 5.7-7 10-7s7.8 3.2 10 7c-2.2 3.8-5.7 7-10 7s-7.8-3.2-10-7z',
-    'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
-    'm4 4 16 16',
+  sq: [
+    'M6.5 4.5h11a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2z',
   ],
 };
 

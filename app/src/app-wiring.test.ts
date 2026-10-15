@@ -558,9 +558,7 @@ describe('panel contents, laid out the way Photoshop lays them out', () => {
       expect(src, `the layer toolbar is missing ${icon}`).toContain(`icon="${icon}"`);
     }
     // The icons have to actually exist in the set, or the button is blank.
-    // `eye-off` is a quoted key (it is not a valid identifier), so the check
-    // has to accept both forms.
-    for (const name of ['wind', 'box', 'trash', 'up', 'down', 'eye', 'eye-off']) {
+    for (const name of ['wind', 'box', 'trash', 'up', 'down', 'eye', 'sq']) {
       expect(rawIcons, `icons.tsx is missing ${name}`).toMatch(
         new RegExp(`['"]?${name}['"]?: \\[`));
     }
@@ -580,6 +578,21 @@ describe('panel contents, laid out the way Photoshop lays them out', () => {
     // The column only lines up if the eye has a fixed width too.
     expect(rawStyles).toMatch(/\.eye \{[\s\S]*?flex: 0 0 18px;/);
     expect(rawStyles).toMatch(/\.layer-thumb \{[\s\S]*?flex: 0 0 26px;/);
+  });
+
+  it('marks visibility with an eye and a hollow square, the way PS does', () => {
+    // A struck-through eye is one shape you have to decode per row. Eyes
+    // against boxes is a column you can scan straight down, and the shown
+    // state gets the brighter colour so the answer is "which are on", not
+    // "what does this glyph mean".
+    expect(src).toMatch(/<ToolIcon name=\{l\.visible \? 'eye' : 'sq'\} size=\{15\} \/>/);
+    expect(src).toMatch(/className=\{`eye \$\{l\.visible \? 'shown' : ''\}`\}/);
+    expect(rawIcons, 'there must be no struck-through eye left').not.toContain('eye-off');
+    // Brightness step, so the two states differ in more than outline.
+    expect(rawStyles).toMatch(/\.eye \{[\s\S]*?color: var\(--txt-faint\);/);
+    expect(rawStyles).toMatch(/\.eye\.shown \{ color: #ececec; \}/);
+    // ...and the glyph has to inherit that, or `.tool-glyph`'s own colour wins.
+    expect(rawStyles).toMatch(/\.eye \.tool-glyph \{ color: inherit;/);
   });
 
   it('refreshes thumbnails on pixel changes only', () => {
