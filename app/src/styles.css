@@ -1,0 +1,401 @@
+:root {
+  --bg: #0f0f12;
+  --bg-1: #16161a;
+  --bg-2: #1c1c21;
+  --bg-3: #232329;
+  --line: #2d2d33;
+  --line-2: #3a3a43;
+  --fg: #e4e4e7;
+  --fg-dim: #9a9aa5;
+  --fg-mute: #64646e;
+  --accent: #6366f1;
+  --accent-hi: #818cf8;
+  --danger: #f43f5e;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', system-ui, sans-serif;
+  font-size: 13px;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--fg);
+  /* No rubber-band scroll, no blue flash on tap: both read as "web page". */
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Installed by installDesktopShell(). A native app never lets you drag a
+   selection across its toolbar or drag an image out of it. */
+.desktop-shell { user-select: none; -webkit-user-select: none; }
+.desktop-shell input,
+.desktop-shell textarea,
+.desktop-shell select,
+.desktop-shell [contenteditable],
+.desktop-shell .selectable { user-select: text; -webkit-user-select: text; }
+.desktop-shell img { -webkit-user-drag: none; user-drag: none; pointer-events: none; }
+/* The 2D canvas is painted on, never dragged. */
+.desktop-shell canvas { -webkit-user-drag: none; user-drag: none; }
+
+/* Scrubbing a brush parameter (F / Shift+F / Ctrl+F): the frozen ring *is* the
+   cursor. An ew-resize arrow on top of it is pure noise — it slides across the
+   screen while the ring deliberately stays put, which reads as two competing
+   pointers. Both viewports already hide the OS cursor; make sure nothing inside
+   them re-introduces one mid-scrub. */
+body.adjusting .paint-view,
+body.adjusting .paint-view *,
+body.adjusting .preview3d,
+body.adjusting .preview3d * { cursor: none; }
+
+/* Dark, thin scrollbars instead of the light OS default. */
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--line-2); border-radius: 5px; border: 2px solid var(--bg);
+}
+::-webkit-scrollbar-thumb:hover { background: #4a4a55; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+button, input, select { font: inherit; color: inherit; }
+button:focus, input:focus, select:focus { outline: none; }
+button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 1px solid var(--accent-hi); outline-offset: 1px;
+}
+
+button {
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 5px 10px;
+  cursor: pointer;
+  transition: background .12s, border-color .12s, color .12s;
+}
+button:hover { background: #2f2f38; border-color: var(--line-2); }
+button:active { transform: translateY(1px); }
+button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+button.primary:hover { background: var(--accent-hi); }
+button.danger:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
+button.wide { width: 100%; }
+button.link {
+  background: none; border: none; color: var(--fg-dim); padding: 2px 0;
+  text-align: left; font-size: 11px;
+}
+button.link:hover { color: var(--accent-hi); background: none; }
+
+input[type=range] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 3px;
+  background: var(--line);
+  border-radius: 3px;
+  outline: none;
+  cursor: pointer;
+  flex: 1;
+  min-width: 40px;
+}
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  background: var(--accent-hi);
+  border: none;
+  cursor: pointer;
+}
+select {
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 6px;
+}
+
+.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spacer { flex: 1; }
+
+/* ---------- layout ---------- */
+.app { display: flex; flex-direction: column; height: 100%; }
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 14px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.brand { display: flex; align-items: center; gap: 7px; font-size: 14px; }
+.brand b { font-weight: 700; letter-spacing: -.2px; }
+.brand-sub { color: var(--accent-hi); font-weight: 600; }
+.brand-mark {
+  width: 20px; height: 20px; border-radius: 6px;
+  background: linear-gradient(135deg, #6366f1, #22d3ee);
+  box-shadow: 0 2px 10px rgba(99,102,241,.35);
+}
+.menu-group { display: flex; gap: 4px; }
+.menu-group.segmented button { border-radius: 0; }
+.menu-group.segmented button:first-child { border-radius: 7px 0 0 7px; }
+.menu-group.segmented button:last-child { border-radius: 0 7px 7px 0; }
+.menu-group.segmented button + button { border-left: none; }
+.project-name { color: var(--fg-mute); font-size: 11px; }
+
+.body { flex: 1; display: flex; min-height: 0; }
+
+.sidebar {
+  width: 296px;
+  flex: 0 0 296px;
+  background: var(--bg-1);
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.sidebar::-webkit-scrollbar { width: 8px; }
+.sidebar::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+
+.sec { display: flex; flex-direction: column; gap: 8px; }
+.sec.grow { flex: 1; min-height: 0; }
+.sec h3 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  padding-left: 9px;
+  position: relative;
+}
+.sec h3::before {
+  content: '';
+  position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+  width: 3px; height: 11px; border-radius: 2px; background: var(--accent);
+}
+
+.dropzone {
+  width: 100%;
+  aspect-ratio: 2 / 1;
+  border: 2px dashed var(--line);
+  background: var(--bg-2);
+  border-radius: 12px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+  color: var(--fg-mute);
+}
+.dropzone:hover { border-color: var(--accent); color: var(--fg-dim); }
+.dropzone small { font-size: 10px; opacity: .7; }
+
+.thumb-row { display: flex; gap: 8px; align-items: center; }
+.thumb { width: 56px; height: 28px; object-fit: cover; border-radius: 5px; border: 1px solid var(--line); }
+.thumb-meta { flex: 1; min-width: 0; font-size: 11px; color: var(--fg-dim); }
+
+.seg { display: flex; gap: 3px; background: var(--bg-2); padding: 3px; border-radius: 9px; border: 1px solid var(--line); }
+.seg button { flex: 1; border: none; background: none; padding: 4px 6px; font-size: 11px; border-radius: 6px; color: var(--fg-mute); }
+.seg button:hover { background: var(--bg-3); color: var(--fg); }
+.seg button.on { background: var(--bg-3); color: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
+.seg.small { padding: 1px; gap: 1px; }
+.seg.small button { padding: 1px 5px; font-size: 9px; }
+
+.row { display: flex; align-items: center; gap: 8px; }
+.row-label { font-size: 10px; color: var(--fg-mute); width: 46px; flex: 0 0 46px; text-transform: uppercase; font-weight: 700; letter-spacing: .04em; }
+.row-value { font-size: 10px; color: var(--accent-hi); font-variant-numeric: tabular-nums; min-width: 34px; text-align: right; }
+
+.layer-tools { display: flex; gap: 4px; }
+.layer-tools button { flex: 1; font-size: 10px; padding: 4px 2px; }
+.layer-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; min-height: 60px; }
+.layer {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  cursor: pointer;
+}
+.layer:hover { border-color: var(--line-2); }
+.layer.active { background: var(--bg-3); }
+.layer .name { flex: 1; font-size: 11px; }
+
+/* Reordering. The row is draggable, but a drag that starts on the name or the
+   badge is what actually happens in practice, so the grip is only an
+   affordance — the whole row stays draggable. */
+.layer .grip {
+  font-size: 11px; line-height: 1; letter-spacing: -2px;
+  color: var(--fg-dim); cursor: grab; user-select: none;
+  opacity: .55;
+}
+.layer:hover .grip { opacity: 1; }
+.layer:active .grip { cursor: grabbing; }
+.layer.drop-target {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), inset 0 0 0 1px var(--accent);
+}
+/* The nudge buttons should not compete for space with the add buttons. */
+.layer-tools .nudge { flex: 0 0 24px; font-size: 9px; padding: 4px 0; }
+.badge { font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 4px; }
+.eye { background: none; border: none; padding: 0 2px; color: var(--fg-mute); font-size: 11px; }
+.eye:hover { background: none; color: #fff; }
+.chip.hint {
+  font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 4px;
+  color: var(--fg-dim); background: var(--bg-2); border: 1px solid var(--line);
+  cursor: help; white-space: nowrap;
+}
+
+.checks { display: flex; gap: 12px; font-size: 11px; color: var(--fg-dim); }
+.checks label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+.recent { display: flex; flex-direction: column; gap: 2px; }
+
+/* ---------- workspace ---------- */
+.workspace { flex: 1; display: flex; min-width: 0; position: relative; background: #08080a; }
+.pane { flex: 1; min-width: 0; position: relative; overflow: hidden; display: flex; }
+.pane + .pane { border-left: 1px solid var(--line); }
+.pane.hidden { flex: 0; display: none; }
+
+/* `container-type: size` so the stage can be sized against the pane in both
+   axes — see below. Its height comes from the flex chain, not from content, so
+   size containment is safe here. */
+.paint-view {
+  flex: 1; overflow: hidden; display: flex;
+  align-items: center; justify-content: center;
+  container-type: size;
+}
+.paint-stage {
+  position: relative;
+  /* Fallback for engines without container query units. */
+  aspect-ratio: 1 / 1;
+  width: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  will-change: transform;
+}
+/* The flowmap is a square UV space, so the stage must stay square whatever
+   shape the pane is.
+   `width: 100%` + `aspect-ratio` + `max-height` did not do that: once the pane
+   was wider than it was tall the height got clamped while the width stayed put,
+   so the image came out squashed — and because the stage was no longer square,
+   the brush ring turned into an ellipse and pointer->UV mapped differently on
+   the two axes. Sizing both axes from the same min() keeps it exact. */
+@supports (width: 1cqw) {
+  .paint-stage {
+    width: min(100cqw, 100cqh);
+    height: min(100cqw, 100cqh);
+    aspect-ratio: auto;
+    max-width: none;
+    max-height: none;
+  }
+}
+.paint-canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+.paint-arrows { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.paint-cursor {
+  position: absolute;
+  border: 1px solid rgba(255,255,255,.85);
+  border-radius: 50%;
+  background: rgba(255,255,255,.10);
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  display: none;
+}
+/* `--fill` (set by PaintView, built in src/brush.ts) is the engine's real
+   falloff curve as a radial gradient: a wide plateau = hard brush, a long
+   shoulder = soft brush. So Shift+F scrubbing is visible even though hardness
+   does not change the radius. The fallback is the hardness-0.4 profile. */
+.paint-cursor-inner {
+  width: 100%; height: 100%; border-radius: 50%;
+  background: var(--fill, radial-gradient(circle closest-side,
+    rgba(255,255,255,.92) 0%,
+    rgba(255,255,255,.90) 51%,
+    rgba(255,255,255,.45) 82%,
+    rgba(255,255,255,0) 100%));
+}
+.paint-reference {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: fill; pointer-events: none; user-select: none;
+}
+.cursor-none { cursor: none; }
+/* Alt held: the brush becomes an eyedropper. Shrink the ring to a small
+   crosshair so it reads as "picking up a value", not "about to paint". */
+.paint-cursor.picking {
+  width: 14px !important; height: 14px !important;
+  border-color: rgba(126,214,255,.95);
+  background: rgba(126,214,255,.18);
+}
+.paint-cursor.picking .paint-cursor-inner {
+  background: none;
+  box-shadow: inset 0 0 0 1px rgba(126,214,255,.55);
+}
+.cursor-default { cursor: default; }
+
+.preview3d { flex: 1; width: 100%; height: 100%; min-width: 0; }
+
+.float-bar {
+  position: absolute;
+  top: 10px; left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  display: flex; align-items: center; gap: 8px;
+  background: rgba(22,22,26,.82);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 5px 8px;
+  box-shadow: 0 8px 26px rgba(0,0,0,.45);
+  max-width: calc(100% - 24px);
+  flex-wrap: wrap;
+}
+.icon-btn {
+  width: 28px; height: 26px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0; font-size: 13px;
+}
+.slider { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--fg-dim); }
+.slider input[type=range] { width: 74px; }
+.slider b { color: var(--accent-hi); font-variant-numeric: tabular-nums; min-width: 30px; text-align: right; }
+
+/* ---------- brush bar ---------- */
+.brushbar {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 14px;
+  padding: 8px 14px;
+  background: var(--bg-1);
+  border-top: 1px solid var(--line);
+}
+.brushbar .slider input[type=range] { width: 110px; }
+.brushbar .slider select {
+  font: inherit; font-size: 10px; color: var(--fg-dim);
+  background: var(--bg-2); border: 1px solid var(--line);
+  border-radius: 4px; padding: 1px 3px;
+}
+.target-chip { font-size: 11px; font-weight: 700; }
+.res-chip { font-size: 10px; color: var(--fg-mute); font-variant-numeric: tabular-nums; }
+.perf-chip {
+  font-size: 10px; color: var(--fg-mute); font-variant-numeric: tabular-nums;
+  background: var(--bg-2); border: 1px solid var(--line);
+  border-radius: 5px; padding: 2px 7px; min-width: 78px; text-align: center;
+}
+.busy { font-size: 11px; color: var(--accent-hi); }
+
+.shortcuts {
+  position: fixed; right: 16px; bottom: 56px;
+  background: rgba(22,22,26,.94);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  box-shadow: 0 12px 40px rgba(0,0,0,.6);
+  z-index: 60;
+  display: flex; flex-direction: column; gap: 5px;
+  font-size: 11px;
+  min-width: 250px;
+}
+.shortcuts b { font-size: 10px; text-transform: uppercase; color: var(--fg-dim); letter-spacing: .06em; }
+.shortcuts > div { display: flex; justify-content: space-between; gap: 16px; color: var(--fg-dim); }
+kbd {
+  background: var(--bg-3); border: 1px solid var(--line-2);
+  border-radius: 4px; padding: 1px 5px; font-size: 10px; color: var(--accent-hi);
+  font-family: inherit;
+}
+
+.loading { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--fg-mute); }
