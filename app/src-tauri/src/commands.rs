@@ -174,17 +174,25 @@ fn emit(state: &State<AppState>) -> Snapshot {
     Snapshot { x, y, w, h, data, full, ms, state: build_state(state) }
 }
 
-/// Warm-up + timed benchmark of the compositing pipeline.
+/// Warm-up + timed benchmark of a **full-canvas** composite.
+///
+/// Deliberately forces the whole canvas each round: the point is to measure the
+/// engine, not the dirty-rect shortcut, and after an idle frame a plain
+/// `composite()` has nothing to rebuild and would report ~0 ms.
 #[tauri::command]
 pub fn bench(state: State<AppState>) -> Vec<f32> {
     let mut e = state.engine.lock().unwrap();
+    e.full_dirty = true;
     e.composite();
     let mut out = Vec::with_capacity(20);
     for _ in 0..20 {
+        e.full_dirty = true;
         let t0 = std::time::Instant::now();
         e.composite();
         out.push(t0.elapsed().as_secs_f32() * 1000.0);
     }
+    // Leave the engine dirty so the next frame redraws the lot.
+    e.full_dirty = true;
     out
 }
 
@@ -314,6 +322,8 @@ pub fn redo(state: State<AppState>) -> Snapshot {
 
 #[tauri::command]
 pub fn update_layer(patch: LayerPatch, state: State<AppState>) -> Snapshot {
+    // Read before `patch.name` is moved out below.
+    let renames_only = patch.name.is_some();
     {
         let mut e = state.engine.lock().unwrap();
         if let Some(l) = e.layer_mut(&patch.id) {
@@ -325,6 +335,12 @@ pub fn update_layer(patch: LayerPatch, state: State<AppState>) -> Snapshot {
             if let Some(v) = patch.strength { l.p.strength = v; l.wind_dirty = true; }
             if let Some(v) = patch.disturbance_enabled { l.p.disturbance_enabled = v; }
             if let Some(v) = patch.disturbance { l.p.disturbance = v; }
+        }
+        // Every field here but `name` moves pixels everywhere: opacity and
+        // visibility re-scale the whole stack, blur and disturbance re-derive a
+        // whole-canvas field. Region-scoped compositing has to be told so.
+        if !renames_only {
+            e.full_dirty = true;
         }
     }
     emit(&state)

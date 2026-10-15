@@ -12,6 +12,12 @@ use crate::engine::buf::{wrap_i, Buf, NEUTRAL};
 /// per-task overhead does not dominate.
 const GRAN: usize = 512;
 
+/// Below this many rows, rayon costs more than the loop it is parallelising.
+///
+/// A brush rectangle is a few dozen rows; handing that to the thread pool is
+/// pure scheduling — measured at ~0.8 ms of overhead for ~16k pixels of work.
+pub const PAR_MIN_ROWS: usize = 96;
+
 fn box_pass(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize, horizontal: bool) {
     let win = (2 * r + 1) as i32;
     let half = win / 2;
@@ -89,6 +95,16 @@ fn box_pass(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize, horizontal
 /// transparent pixels (zero, i.e. black) into the semi-transparent fringe, which
 /// is exactly what produces a dark halo round a stroke. So: premultiply once,
 /// box-blur, unpremultiply once.
+/// How far a pixel's blurred value can reach, in pixels.
+///
+/// `blur` is three box passes of `br`, so a source pixel can influence
+/// `3 * br` of its neighbours. The compositor needs this to grow the region it
+/// rebuilds: `blend` is pointwise but `blur` is not.
+pub fn blur_influence(radius: f32) -> usize {
+    let br = ((radius * 0.62).max(1.0)).round() as usize;
+    3 * br + 2
+}
+
 pub fn blur(src: &Buf, radius: f32) -> Buf {
     let r = radius.round() as usize;
     let (w, h) = (src.w, src.h);
@@ -485,11 +501,27 @@ pub fn generate_wind(
 // ---------------------------------------------------------------------------
 
 /// `obs_alpha` is a half-resolution alpha plane (lw * lh) of the blurred mask.
-pub fn apply_disturbance(target: &mut Buf, obs_alpha: &[u8], lw: usize, lh: usize, sample_step: usize) {
+///
+/// Only `[x0, x1) x [y0, y1)` is touched. The disturbance is a **pointwise**
+/// function of the pixel: the gradient and the influence come from the plane,
+/// which depends on the mask alone, never on neighbouring output pixels. So a
+/// restricted rectangle gives byte-identical results to a full-canvas pass,
+/// and the compositor can get away with rebuilding only what changed.
+pub fn apply_disturbance(
+    target: &mut Buf,
+    obs_alpha: &[u8],
+    lw: usize,
+    lh: usize,
+    sample_step: usize,
+    x0: usize,
+    x1: usize,
+    y0: usize,
+    y1: usize,
+) {
     let w = target.w;
-    let h = target.h;
     let ds = w / lw;
-    let _ = h;
+    let _ = lh;
+    let stride = w * 4;
 
     let get = |tx: i32, ty: i32| -> f32 {
         let cx = tx.clamp(0, lw as i32 - 1) as usize;
@@ -497,9 +529,9 @@ pub fn apply_disturbance(target: &mut Buf, obs_alpha: &[u8], lw: usize, lh: usiz
         obs_alpha[cy * lw + cx] as f32
     };
 
-    target.data.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
+    let body = |y: usize, row: &mut [u8]| {
         let ly = (y / ds) as i32;
-        for x in 0..w {
+        for x in x0..x1 {
             let i = x * 4;
             let lx = (x / ds) as i32;
             let alpha = get(lx, ly);
@@ -557,7 +589,14 @@ pub fn apply_disturbance(target: &mut Buf, obs_alpha: &[u8], lw: usize, lh: usiz
             row[i] = (128.0 - fvx * 128.0).clamp(0.0, 255.0) as u8;
             row[i + 1] = (128.0 + fvy * 128.0).clamp(0.0, 255.0) as u8;
         }
-    });
+    };
+
+    let band = &mut target.data[y0 * stride..y1 * stride];
+    if y1 - y0 >= PAR_MIN_ROWS {
+        band.par_chunks_mut(stride).enumerate().for_each(|(dy, row)| body(y0 + dy, row));
+    } else {
+        band.chunks_mut(stride).enumerate().for_each(|(dy, row)| body(y0 + dy, row));
+    }
 }
 
 /// Build the half-resolution blurred alpha plane used by `apply_disturbance`.

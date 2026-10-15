@@ -1208,3 +1208,121 @@ fn eyedropper_wraps_at_the_equirect_seam() {
     assert!((left - right).abs() < 0.05, "seam sides disagree: {left} vs {right}");
     assert!(left > 0.1, "the stroke should be readable at the seam: {left}");
 }
+
+// ---------------------------------------------------------------------------
+// Region-scoped compositing
+//
+// The engine rebuilds only the rectangle that changed. Everything below is
+// about proving that shortcut is invisible: a partial composite must land on
+// exactly the bytes a full one would have.
+// ---------------------------------------------------------------------------
+
+/// Same content two ways: `f` reaches it one dab at a time (each composite
+/// region-scoped), `e` reaches it in one full rebuild.
+fn region_vs_full<F: Fn(&mut Engine)>(n: usize, build: F) -> (Vec<u8>, Vec<u8>) {
+    let mut e = bare_engine(n);
+    build(&mut e);
+    e.full_dirty = true;
+    e.composite();
+    let full = e.composite.data.clone();
+
+    let mut f = bare_engine(n);
+    build(&mut f);
+    f.composite();
+    f.clear_dirty();
+    (f.composite.data.clone(), full)
+}
+
+#[test]
+fn a_region_rebuild_is_pixel_identical_to_a_full_one() {
+    let (partial, full) = region_vs_full(128, |e| {
+        let paint = e.add_layer(LayerKind::Paint);
+        let obs = e.add_layer(LayerKind::Obstacle);
+        e.active = obs.clone();
+        drag(e, 1.0, 1.0, 10);
+        e.active = paint;
+        drag(e, 1.0, 1.0, 11);
+    });
+    assert_eq!(partial, full, "region-scoped composite drifted from the full one");
+}
+
+#[test]
+fn a_region_rebuild_matches_with_a_wind_layer_underneath() {
+    // The wind layer is full-canvas; the region path must still start from the
+    // same wind pixels, not from neutral.
+    let (partial, full) = region_vs_full(128, |e| {
+        e.add_layer(LayerKind::Wind);
+        let paint = e.add_layer(LayerKind::Paint);
+        e.active = paint;
+        drag(e, 0.8, 1.0, 1);
+    });
+    assert_eq!(partial, full, "wind under a region-scoped paint drifted");
+}
+
+#[test]
+fn a_blurred_layer_still_rebuilds_its_fringe() {
+    // Blur is the one composite input that reads outside the changed
+    // rectangle. Too small a margin leaves a stale ring trailing the brush —
+    // and it would only show up while painting, never in a full rebuild.
+    let n = 128;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+    e.layer_mut(&id).unwrap().p.blur = 8.0;
+    e.composite();
+    e.clear_dirty();
+
+    e.stroke(&[(0.3, 0.5), (0.36, 0.5)], 24.0, 0.5, 1.0, false, "content", 1, 1.0);
+    e.composite();
+    let partial = e.composite.data.clone();
+
+    e.full_dirty = true;
+    e.composite();
+    assert_eq!(e.composite.data, partial, "blur fringe went stale outside the dab");
+}
+
+#[test]
+fn a_dab_only_dirties_its_own_neighbourhood() {
+    // The point of the whole exercise: brush size must drive the cost, not
+    // canvas size. If this ever returns the full canvas, painting is O(n^2)
+    // per frame again.
+    let n = 1024;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+    e.composite();
+    e.clear_dirty();
+
+    drag(&mut e, 1.0, 1.0, 1);
+    e.composite();
+    let (_, _, w, h) = e.dirty_rect();
+    assert!(w > 0 && h > 0, "the dab must report a change");
+    // The dab spans ~61px plus a 20px radius either side, so ~101x40 is the
+    // honest answer. What matters is that it tracks the brush, not the canvas.
+    assert!(w <= 128 && h <= 64, "a 40px dab dirtied {w}x{h} of a {n}px canvas");
+}
+
+#[test]
+fn compositing_an_unchanged_engine_reports_nothing() {
+    let mut e = bare_engine(64);
+    e.composite();
+    e.clear_dirty();
+    e.composite();
+    assert_eq!(e.dirty_rect(), (0, 0, 0, 0), "nothing changed, so nothing should be redrawn");
+}
+
+#[test]
+fn a_stale_canvas_is_rebuilt_after_a_full_dirty() {
+    // `clear_dirty` no longer copies `prev_composite`, so the only thing
+    // standing between a stale prev buffer and a wrong diff is `full_dirty`.
+    let mut e = bare_engine(64);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+    e.composite();
+    e.clear_dirty();
+    drag(&mut e, 1.0, 1.0, 1);
+    e.full_dirty = true;
+    e.composite();
+    let (x, y, w, h) = e.dirty_rect();
+    assert_eq!((x, y, w, h), (0, 0, 64, 64), "a full rebuild must report the whole canvas");
+}

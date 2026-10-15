@@ -316,7 +316,16 @@ pub fn load_project(path: &str) -> Result<Engine, String> {
             data: decompress_or(&m, expect),
         });
         let wind_dirty = s.p.kind == LayerKind::Wind;
-        engine.layers.push(super::LayerData { p: s.p, buf, mask, wind_dirty });
+        engine.layers.push(super::LayerData {
+            p: s.p,
+            buf,
+            mask,
+            wind_dirty,
+            buf_dirty: true,
+            mask_dirty: true,
+            blur_cache: None,
+            plane_cache: None,
+        });
     }
     if engine.layers.is_empty() {
         return Err("工程文件不包含图层".into());
