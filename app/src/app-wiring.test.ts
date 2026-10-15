@@ -297,28 +297,37 @@ describe('layer order: the stack has to be rearrangeable', () => {
   /**
    * Two independent problems made order feel fixed.
    *
-   * 1. The desktop shell cancelled `dragstart` for any element that is not
-   *    itself draggable, and you grab a layer row by its name or its badge, not
-   *    by its padding. Covered in desktop.test.ts - here we only assert the row
-   *    really is draggable.
-   * 2. Order had no effect on the composite anyway: see the Rust tests for
+   * 1. Order had no effect on the composite anyway: see the Rust tests for
    *    `a_flow_layer_above_an_obstacle_covers_it`.
+   * 2. Dragging did nothing at all. It was built on HTML5 drag-and-drop, and
+   *    **`dragstart` never arrives in this WebView2** — the row was wired up
+   *    correctly and still never moved. Reordering now runs on pointer events,
+   *    which is what the splitter and every brush stroke already use.
    */
-  it('exposes the row as a drag source', () => {
-    expect(src).toMatch(/draggable\s+onDragStart/);
-    expect(src).toMatch(/effectAllowed = 'move'/);
-    expect(src).toMatch(/setData\('text\/plain', String\(i\)\)/);
+  it('drags the row with pointer events, not HTML5 drag-and-drop', () => {
+    expect(src).toMatch(/onPointerDown=\{beginRowDrag\(l\.id\)\}/);
+    expect(src).toMatch(/const beginRowDrag = \(lid: string\) => \(e: React\.PointerEvent<HTMLElement>\) => \{/);
+    // The whole HTML5 path is gone, and with it the dataTransfer plumbing.
+    expect(src).not.toMatch(/onDragStart/);
+    expect(src).not.toMatch(/dataTransfer/);
   });
 
-  it('reorders on drop using the row index it was dropped on', () => {
-    expect(src).toMatch(/onDrop/);
-    expect(src).toMatch(/if \(from !== i\) structural\(api\.reorder\(from, i\)\)/);
+  it('reorders on release using the visual row it landed on', () => {
+    expect(src).toMatch(/const from = layers\.findIndex\(\(l\) => l\.id === lid\);/);
+    expect(src).toMatch(/const to = layers\.findIndex\(\(l\) => l\.id === over\);/);
+    expect(src).toMatch(/if \(from >= 0 && to >= 0\) structural\(api\.reorder\(from, to\)\);/);
   });
 
-  it('highlights the row being dropped onto', () => {
-    expect(src).toMatch(/dragOver === i \? 'drop-target'/);
-    expect(src).toMatch(/onDragLeave/);
-    expect(src).toMatch(/onDragEnd/);
+  it('highlights the row it would land on', () => {
+    expect(src).toMatch(/rowDrag && rowDrag\.over === l\.id && rowDrag\.id !== l\.id \? 'drop-target' : ''/);
+    expect(rawStyles).toMatch(/\.layer\.drop-target \{ box-shadow: inset 0 0 0 2px var\(--accent\); \}/);
+    // ...and dims the one you picked up, the same feedback the dock gives.
+    expect(rawStyles).toMatch(/\.layer\.dragging \{ opacity: \.5; \}/);
+  });
+
+  it('needs a threshold, or a click could never select a layer', () => {
+    expect(src).toMatch(/const DRAG_MIN_PX = 4;/);
+    expect(src).toMatch(/if \(Math\.abs\(ev\.clientY - startY\) < DRAG_MIN_PX\) return;/);
   });
 
   it('offers buttons as well, because a drag handle is undiscoverable', () => {
@@ -375,13 +384,13 @@ describe('Photoshop-style shell', () => {
   });
 
   it('makes the right-hand panels collapsible', () => {
-    expect(src).toMatch(/<aside className="panels">/);
+    expect(src).toMatch(/<aside className="panels" ref={dockRef}>/);
     // Keyed off the dock id now: the column renders from `panelOrder`, so no
     // panel can have a hardcoded `collapsed.layers`.
     expect(src).toMatch(/collapsed=\{!!collapsed\[pid\]\}/);
-    expect(src).toMatch(/onToggle=\{\(\) => togglePanel\(pid\)\}/);
+    expect(src).toMatch(/onToggle=\{\(\) => \{[\s\S]*?togglePanel\(pid\);[\s\S]*?\}\}/);
     // The header has to be a real button or it is unreachable by keyboard.
-    expect(src).toMatch(/<button className="panel-head" onClick=\{onToggle\} aria-expanded=/);
+    expect(src).toMatch(/<button className="panel-head" onClick=\{onToggle\}[\s\S]*?aria-expanded=\{!collapsed\}/);
     expect(src).toMatch(/\{!collapsed && <div className="panel-body">/);
   });
 
@@ -406,7 +415,7 @@ describe('Photoshop-style shell', () => {
     expect(src).toMatch(/case 'togglePanels': setShellHidden\(\(v\) => !v\); break;/);
     // Toolbox, panels and options bar all go; the canvas keeps everything.
     expect(src).toMatch(/\{!shellHidden && \(\s*<nav className="toolbox">/);
-    expect(src).toMatch(/\{!shellHidden && \(\s*<aside className="panels">/);
+    expect(src).toMatch(/\{!shellHidden && \(\s*<aside className="panels" ref={dockRef}>/);
     expect(src).toMatch(/\{!shellHidden && \(\s*<div className="optionsbar">/);
   });
 });
@@ -629,23 +638,24 @@ describe('the panel column is a dock, not a fixed stack', () => {
   });
 
   it('makes the title bar the drag handle', () => {
-    // On the header, not on the section wrapper: the wrapper would turn the
-    // whole panel body — sliders included — into a drag source.
-    expect(src).toMatch(/const dockProps = \(id: PanelId\) => \(\{/);
-    expect(src).toMatch(/<button className="panel-head" onClick=\{onToggle\} aria-expanded=\{!collapsed\}[\s\S]*?\{\.\.\.dock\}/);
-    expect(src).toMatch(/dock=\{dockProps\(pid\)\}/);
+    // On the header, not on the section wrapper: the wrapper would turn every
+    // slider in the panel body into a drag source too.
+    expect(src).toMatch(/onPointerDown=\{onHeadDown\}/);
+    expect(src).toMatch(/onHeadDown=\{beginDockDrag\(pid\)\}/);
   });
 
-  it('does not let the two drag sources in the same column collide', () => {
-    // The layer list already owns `text/plain`, and `getData` is unreadable
-    // during `dragover` — `types` is all a handler gets. Distinct types are
-    // the only way one list can ignore the other's drag.
-    expect(src).toMatch(/const DOCK_MIME = 'application\/x-sf-panel';/);
-    expect(src).toMatch(/setData\(DOCK_MIME, id\)/);
-    expect(src).toMatch(/if \(!e\.dataTransfer\.types\.includes\(DOCK_MIME\)\) return;/);
-    expect(src).toMatch(/if \(!e\.dataTransfer\.types\.includes\('text\/plain'\)\) return;/);
-    // ...and a panel payload must never be read as a layer index.
-    expect(src).toMatch(/if \(!\/\^\\d\+\$\/\.test\(raw\)\) return;/);
+  it('accepts a drop anywhere on the card, not just on the 30px header', () => {
+    // HTML5 drag-and-drop forced the drop onto the header, because only the
+    // header had a handler. The hit-test is now "nearest card", which also
+    // resolves the 4px gaps between cards instead of dropping the reorder.
+    expect(src).toMatch(/const hitDockPanel = \(y: number\): string \| null => \{/);
+    expect(src).toMatch(/const d = y < r\.top \? r\.top - y : y > r\.bottom \? y - r\.bottom : 0;/);
+  });
+
+  it('swallows the click a drag leaves behind', () => {
+    // A drag ends with a click on the header it started from — and that click
+    // would fold the panel you just moved.
+    expect(src).toMatch(/if \(swallowClick\.current\) \{ swallowClick\.current = false; return; \}/);
   });
 
   it('reorders by moving 到 the slot it was dropped on', () => {
@@ -658,7 +668,7 @@ describe('the panel column is a dock, not a fixed stack', () => {
 
   it('shows where the panel will land', () => {
     // Without the rule a reorder is invisible until it is already done.
-    expect(src).toMatch(/panelOver === pid && panelDrag && panelDrag !== pid \? 'drop-above' : '',/);
+    expect(src).toMatch(/dockDrag && dockDrag\.over === pid && dockDrag\.id !== pid \? 'drop-above' : '',/);
     expect(rawStyles).toMatch(/\.panel\.drop-above \{ box-shadow: 0 -2px 0 var\(--accent\); \}/);
     expect(rawStyles).toMatch(/\.panel\.dragging \{ opacity: \.5; \}/);
     // ...and the title bar says it is draggable, because nothing else does.

@@ -559,6 +559,8 @@ input[type=checkbox] {
 .layer.active .name { color: #fff; }
 .layer .name { flex: 1; font-size: 11px; color: var(--txt-dim); }
 .layer.drop-target { box-shadow: inset 0 0 0 2px var(--accent); }
+/* Same feedback as the dock: dim the row you picked up. */
+.layer.dragging { opacity: .5; }
 
 /* Visibility column. Two states, and the difference between them is the whole
    point: a filled eye for shown, a hollow square for hidden.

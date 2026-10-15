@@ -83,10 +83,15 @@ describe('desktop shell — no browser chrome', () => {
     }
   });
 
-  it('lets a layer row be dragged by any of its children', () => {
-    // You grab a layer row by its name or its badge, and those children report
-    // draggable === false. Cancelling the default there aborts the drag before
-    // it starts, which is why reordering looked like it was never wired up.
+  it('lets a draggable element be dragged by any of its children', () => {
+    // `e.target` is almost never the draggable element itself — you grab a row
+    // by its name or its badge, and those children report `draggable === false`.
+    // Cancelling the default there aborts the drag before it starts.
+    //
+    // Nothing in the app drags via HTML5 any more (reordering runs on pointer
+    // events, because `dragstart` never arrives in this WebView2), but the
+    // whitelist still has to be right: it is what keeps this guard from eating
+    // a drag it should let through.
     document.body.innerHTML =
       '<div draggable="true"><span class="badge">流向</span><span class="name">图层 1</span><button class="eye">◉</button></div>';
     const row = document.body.firstElementChild!;

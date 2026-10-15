@@ -48,14 +48,66 @@ const PANEL_IDS = ['props', 'layers', 'view', 'document', 'export'] as const;
 type PanelId = typeof PANEL_IDS[number];
 
 /**
- * Drag payload type for reordering the dock.
+ * Pointer travel before a press becomes a drag, px.
  *
- * Deliberately not `text/plain`: the layer list is another drag source in the
- * same column and already owns that type, and `getData` is unreadable during
- * `dragover` — `types` is all a handler gets. Distinct types let each list
- * ignore the other's drag.
+ * Below this the press is a click and does what the click does — fold the
+ * panel, select the layer. Without the threshold, moving the mouse 1px while
+ * clicking a panel header would silently cancel the fold.
  */
-const DOCK_MIME = 'application/x-sf-panel';
+const DRAG_MIN_PX = 4;
+
+/**
+ * Reorder something by dragging it, using pointer events.
+ *
+ * HTML5 drag-and-drop is what this used to rely on, and it does not fire in
+ * this WebView2 — `dragstart` never arrives, so both the panel dock and the
+ * layer list looked like they were never wired up. Pointer events are what the
+ * rest of the app already runs on (the 2D/3D splitter, every brush stroke, the
+ * brush-parameter scrubber), and those demonstrably work, so reordering runs
+ * on them too.
+ *
+ * `hit` maps a viewport Y to the id of the row/panel under it. `on` is called
+ * with the current target while moving and once more on release — `'cancel'` if
+ * the pointer was cancelled. It is not called at all if the pointer never
+ * passed the threshold, which is what keeps a plain click a click.
+ */
+function beginPointerReorder(
+  e: React.PointerEvent<HTMLElement>,
+  hit: (y: number) => string | null,
+  on: (over: string | null, phase: 'move' | 'end' | 'cancel') => void,
+) {
+  if (e.button !== 0) return;
+  const el = e.currentTarget;
+  const startY = e.clientY;
+  let started = false;
+  let over: string | null = null;
+
+  const move = (ev: PointerEvent) => {
+    if (!started) {
+      if (Math.abs(ev.clientY - startY) < DRAG_MIN_PX) return;
+      started = true;
+    }
+    over = hit(ev.clientY);
+    on(over, 'move');
+  };
+  const finish = (phase: 'end' | 'cancel') => {
+    el.removeEventListener('pointermove', move);
+    el.removeEventListener('pointerup', up);
+    el.removeEventListener('pointercancel', cancel);
+    // Capture is released on pointerup anyway; this is the cancel path.
+    try { el.releasePointerCapture(e.pointerId); } catch { /* already gone */ }
+    if (started) on(over, phase);
+  };
+  const up = () => finish('end');
+  const cancel = () => finish('cancel');
+
+  // Capture, so the moves keep coming even once the pointer has left the
+  // 28px-tall header — which it will, immediately.
+  el.setPointerCapture(e.pointerId);
+  el.addEventListener('pointermove', move);
+  el.addEventListener('pointerup', up);
+  el.addEventListener('pointercancel', cancel);
+}
 
 /**
  * Panels that start folded. Document setup and export are set once and then
@@ -121,7 +173,12 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [recent, setRecent] = useState<string[]>([]);
   const [showShortcuts, setShowShortcuts] = useState(false);
-  const [dragOver, setDragOver] = useState<number | null>(null);
+  /**
+   * Set when a pointer drag finishes on the element it started from. The
+   * browser turns that into a click too, and the click is what folds a panel or
+   * selects a layer — so a drag has to swallow exactly one.
+   */
+  const swallowClick = useRef(false);
   /** Backend-encoded PNG of the reference image (TGA-safe display path). */
   const [refSrc, setRefSrc] = useState<string | null>(null);
   /**
@@ -146,10 +203,14 @@ export default function App() {
    * point.
    */
   const [panelOrder, setPanelOrder] = useState<PanelId[]>([...PANEL_IDS]);
-  /** Panel being dragged, and the one it would land on. Both for feedback
-   *  only: without the accent line a reorder is invisible until it is done. */
-  const [panelDrag, setPanelDrag] = useState<string | null>(null);
-  const [panelOver, setPanelOver] = useState<string | null>(null);
+  /**
+   * Dock drag in progress: which panel is being moved, and which one it would
+   * land on. Both are for feedback only — without the accent line a reorder is
+   * invisible until it is already done.
+   */
+  const [dockDrag, setDockDrag] = useState<{ id: PanelId; over: PanelId | null } | null>(null);
+  /** Layer row drag in progress, by layer id. */
+  const [rowDrag, setRowDrag] = useState<{ id: string; over: string | null } | null>(null);
   /** Tab: hide the toolbox, the panels and the options bar. PS calls this
    *  "collapse all panels" and it is the single most useful key when painting. */
   const [shellHidden, setShellHidden] = useState(false);
@@ -173,6 +234,9 @@ export default function App() {
   };
 
   const paintRef = useRef<PaintViewHandle>(null);
+  /** The dock and the layer list, for hit-testing during a reorder drag. */
+  const dockRef = useRef<HTMLElement | null>(null);
+  const layerListRef = useRef<HTMLDivElement | null>(null);
   const previewRef = useRef<Preview3DHandle>(null);
   /** Cursor shared between the 2D view and the 3D preview (canvas coords). */
   const sharedCursor = useRef<CursorUV | null>(null);
@@ -593,35 +657,66 @@ export default function App() {
 
   // -- dock -----------------------------------------------------------------
   /**
-   * Drag-to-reorder props for a panel's title bar.
+   * Which panel a viewport Y is closest to.
    *
-   * A custom MIME type, not `text/plain`: the layer rows below already use
-   * `text/plain`, and `getData` is deliberately unreadable during `dragover` —
-   * `types` is all a handler gets. Distinct types let each list ignore the
-   * other's drag instead of lighting up two drop targets at once.
+   * Nearest rather than "contains": the 4px gaps between cards are dead space,
+   * and a pointer that lands in one should still resolve to a panel instead of
+   * silently dropping the reorder.
    */
-  const dockProps = (id: PanelId) => ({
-    draggable: true,
-    onDragStart: (e: React.DragEvent) => {
-      e.dataTransfer.setData(DOCK_MIME, id);
-      e.dataTransfer.effectAllowed = 'move';
-      setPanelDrag(id);
-    },
-    onDragEnd: () => { setPanelDrag(null); setPanelOver(null); },
-    onDragOver: (e: React.DragEvent) => {
-      if (!e.dataTransfer.types.includes(DOCK_MIME)) return;
-      e.preventDefault();
-      setPanelOver(id);
-    },
-    onDragLeave: () => setPanelOver((v) => (v === id ? null : v)),
-    onDrop: (e: React.DragEvent) => {
-      const from = e.dataTransfer.getData(DOCK_MIME);
-      e.preventDefault();
-      setPanelDrag(null);
-      setPanelOver(null);
-      if (from) reorderPanel(from, id);
-    },
-  });
+  const hitDockPanel = (y: number): string | null => {
+    const nodes = dockRef.current?.querySelectorAll<HTMLElement>('.panel[data-panel]');
+    if (!nodes?.length) return null;
+    let best: { id: string; d: number } | null = null;
+    for (const n of nodes) {
+      const r = n.getBoundingClientRect();
+      const d = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0;
+      if (!best || d < best.d) best = { id: n.dataset.panel!, d };
+    }
+    return best?.id ?? null;
+  };
+
+  /** Which layer row a viewport Y is closest to. Same reasoning as above. */
+  const hitLayerRow = (y: number): string | null => {
+    const rows = layerListRef.current?.querySelectorAll<HTMLElement>('.layer[data-lid]');
+    if (!rows?.length) return null;
+    let best: { id: string; d: number } | null = null;
+    for (const n of rows) {
+      const r = n.getBoundingClientRect();
+      const d = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0;
+      if (!best || d < best.d) best = { id: n.dataset.lid!, d };
+    }
+    return best?.id ?? null;
+  };
+
+  /** Grab a panel by its title bar. */
+  const beginDockDrag = (id: PanelId) => (e: React.PointerEvent<HTMLElement>) => {
+    // Clear first: a flag left over from a drag that never produced a click
+    // would eat the next real one. Safe to clear here — the click we care
+    // about arrives after pointerup, not before.
+    swallowClick.current = false;
+    beginPointerReorder(e, hitDockPanel, (over, phase) => {
+      if (phase === 'move') { setDockDrag({ id, over: over as PanelId | null }); return; }
+      setDockDrag(null);
+      if (phase !== 'end') return;
+      swallowClick.current = true;
+      if (over && over !== id) reorderPanel(id, over);
+    });
+  };
+
+  /** Grab a layer row. */
+  const beginRowDrag = (lid: string) => (e: React.PointerEvent<HTMLElement>) => {
+    swallowClick.current = false;
+    beginPointerReorder(e, hitLayerRow, (over, phase) => {
+      if (phase === 'move') { setRowDrag({ id: lid, over }); return; }
+      setRowDrag(null);
+      if (phase !== 'end') return;
+      swallowClick.current = true;
+      if (!over || over === lid) return;
+      const from = layers.findIndex((l) => l.id === lid);
+      const to = layers.findIndex((l) => l.id === over);
+      if (from >= 0 && to >= 0) structural(api.reorder(from, to));
+    });
+  };
 
   /**
    * Panel bodies, keyed so the dock can render them in `panelOrder` rather
@@ -710,38 +805,23 @@ export default function App() {
             disabled={state.layers.length <= 1}
             onClick={() => activeLayer && structural(api.removeLayer(activeLayer.id))} />
         </div>
-        <div className="layer-list bleed">
-          {layers.map((l, i) => {
+        <div className="layer-list bleed" ref={layerListRef}>
+          {layers.map((l) => {
             const meta = KIND_META[l.kind];
             const active = l.id === state.active;
             return (
               <div
                 key={l.id}
-                draggable
-                onDragStart={(e) => {
-                  e.dataTransfer.setData('text/plain', String(i));
-                  e.dataTransfer.effectAllowed = 'move';
-                }}
-                onDragOver={(e) => {
-                  // Ignore a panel drag: the two lists share a column and a
-                  // row lighting up under a panel is pure noise.
-                  if (!e.dataTransfer.types.includes('text/plain')) return;
-                  e.preventDefault();
-                  setDragOver(i);
-                }}
-                onDragLeave={() => setDragOver((d) => (d === i ? null : d))}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  setDragOver(null);
-                  const raw = e.dataTransfer.getData('text/plain');
-                  if (!/^\d+$/.test(raw)) return;
-                  const from = Number(raw);
-                  if (from !== i) structural(api.reorder(from, i));
-                }}
-                onDragEnd={() => setDragOver(null)}
-                className={`layer ${active ? 'active' : ''} ${dragOver === i ? 'drop-target' : ''}`}
+                data-lid={l.id}
+                onPointerDown={beginRowDrag(l.id)}
+                className={`layer ${active ? 'active' : ''} ${
+                  rowDrag && rowDrag.over === l.id && rowDrag.id !== l.id ? 'drop-target' : ''
+                } ${rowDrag?.id === l.id ? 'dragging' : ''}`}
                 title={`${meta.label} · ${l.name}`}
-                onClick={async () => { setState(await api.setActive(l.id)); }}
+                onClick={async () => {
+                  if (swallowClick.current) { swallowClick.current = false; return; }
+                  setState(await api.setActive(l.id));
+                }}
               >
                 {/* The visibility column sits in its own fixed width so every
                     glyph lines up down the list, which is the whole reason the
@@ -1095,7 +1175,7 @@ export default function App() {
         </div>
 
         {!shellHidden && (
-          <aside className="panels">
+          <aside className="panels" ref={dockRef}>
             {panelOrder.filter((pid) => panels[pid] !== null).map((pid) => (
               <Panel
                 key={pid}
@@ -1103,14 +1183,19 @@ export default function App() {
                 title={panelTitle[pid]}
                 grow={pid === 'layers'}
                 collapsed={!!collapsed[pid]}
-                onToggle={() => togglePanel(pid)}
-                dock={dockProps(pid)}
+                onToggle={() => {
+                  // A drag ends with a click on the header it started from;
+                  // that click must not also fold the panel.
+                  if (swallowClick.current) { swallowClick.current = false; return; }
+                  togglePanel(pid);
+                }}
+                onHeadDown={beginDockDrag(pid)}
                 cls={[
-                  panelDrag === pid ? 'dragging' : '',
+                  dockDrag?.id === pid ? 'dragging' : '',
                   // PS marks the drop slot with a blue rule on the edge the
                   // panel will land against. Without it a reorder is invisible
                   // until it is already done.
-                  panelOver === pid && panelDrag && panelDrag !== pid ? 'drop-above' : '',
+                  dockDrag && dockDrag.over === pid && dockDrag.id !== pid ? 'drop-above' : '',
                 ].filter(Boolean).join(' ')}
               >
                 {panels[pid]}
@@ -1155,24 +1240,26 @@ export default function App() {
 /**
  * A right-hand panel. Photoshop's panels fold to a title bar only, which is
  * what makes the panel column usable: you keep the layers open and shut
- * everything you are not touching. The same title bar is also the drag handle
- * for reordering the dock, which is why `dock` lands on it and not on the
- * section wrapper — the wrapper would make the whole panel body a drag source,
- * including its sliders.
+ * everything you are not touching. The same title bar is the drag handle for
+ * reordering the dock, which is why `onHeadDown` lands on it and not on the
+ * section wrapper — the wrapper would make every slider in the panel body a
+ * drag source too.
  *
  * The header is a real button so it is keyboard reachable; `data-panel` is
- * there for the tests to latch onto.
+ * there for the tests (and for the hit-test during a drag) to latch onto.
  */
-function Panel({ id, title, children, collapsed, onToggle, grow, cls, dock }:
+function Panel({ id, title, children, collapsed, onToggle, grow, cls, onHeadDown }:
   { id: string; title: string; children: React.ReactNode; collapsed: boolean;
-    onToggle: () => void; grow?: boolean; cls?: string; dock?: object }) {
+    onToggle: () => void; grow?: boolean; cls?: string;
+    onHeadDown: (e: React.PointerEvent<HTMLElement>) => void }) {
   return (
     <section
       className={`panel ${collapsed ? 'collapsed' : ''} ${grow ? 'grow' : ''} ${cls ?? ''}`}
       data-panel={id}
     >
-      <button className="panel-head" onClick={onToggle} aria-expanded={!collapsed}
-        title={`${title} · 点击折叠，拖动标题栏可重排`} {...dock}>
+      <button className="panel-head" onClick={onToggle} onPointerDown={onHeadDown}
+        aria-expanded={!collapsed}
+        title={`${title} · 点击折叠，拖动标题栏可重排`}>
         <span className="chev"><ToolIcon name={collapsed ? 'right' : 'down'} size={12} /></span>
         <span className="ellipsis">{title}</span>
       </button>

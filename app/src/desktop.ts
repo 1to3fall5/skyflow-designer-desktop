@@ -61,18 +61,16 @@ export function installDesktopShell(
   // -- drag & drop of page content ----------------------------------------
   // File drops are handled by Tauri's own drag-drop event, so the DOM-level
   // default (navigate to the dropped file) must never fire.
+  //
+  // Nothing in the app drags via HTML5 any more: reordering the panel dock and
+  // the layer list runs on pointer events, because `dragstart` does not arrive
+  // in this WebView2 at all — both features looked like they were never wired
+  // up. This stays as the guard against a *file* or image being dragged out of
+  // the window, which is the page behaviour it was written for.
   const onDragStart = (e: DragEvent) => {
     const t = e.target as HTMLElement | null;
     if (!t) return;
-    // Walk up to the draggable ancestor.
-    //
-    // `e.target` is almost never the draggable element itself — you grab a
-    // layer row by its name or its badge, and those children report
-    // `draggable === false`. Cancelling the default there aborts the drag
-    // before it starts, which is why reordering the layer list looked like it
-    // was never wired up: only a grab on the row's own padding worked.
     if (t.closest('[draggable="true"]')) return;
-    if (t.tagName === 'BUTTON') return;
     e.preventDefault();
   };
   const onDrop = (e: DragEvent) => e.preventDefault();
