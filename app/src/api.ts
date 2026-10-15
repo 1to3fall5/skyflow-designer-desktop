@@ -27,6 +27,12 @@ export interface AppState {
   project_path: string | null;
 }
 
+/** One layer's thumbnail, base64 PNG, for the 图层 panel's left column. */
+export interface LayerThumb {
+  id: string;
+  png: string;
+}
+
 export interface Snapshot {
   x: number;
   y: number;
@@ -75,6 +81,16 @@ export const api = {
   /** PNG data URL for display — the WebView cannot decode TGA itself. */
   getReferencePng: () => invoke<string | null>('get_reference_png'),
   clearReference: () => invoke<AppState>('clear_reference'),
+  /**
+   * One small PNG per layer, batched.
+   *
+   * Called on pixel changes only — end of a stroke, end of a fill, clear,
+   * undo, and any structural edit — not on parameter changes. Photoshop's
+   * thumbnails show *content*, so they do not move when you drag 不透明度, and
+   * a per-slider-frame IPC round trip would be paid for nothing.
+   */
+  layerThumbs: (size = 32) =>
+    invoke<LayerThumb[]>('layer_thumbs', { size }).catch(() => [] as LayerThumb[]),
   saveHistory: () => invoke<void>('save_history'),
   undo: () => invoke<Snapshot>('undo'),
   redo: () => invoke<Snapshot>('redo'),

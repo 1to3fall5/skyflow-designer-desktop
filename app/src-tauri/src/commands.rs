@@ -266,6 +266,37 @@ pub fn clear_reference(state: State<AppState>) -> StateResp {
     build_state(&state)
 }
 
+#[derive(Serialize)]
+pub struct LayerThumb {
+    pub id: String,
+    /// base64 PNG. Small enough (a few hundred bytes) that a data URL is
+    /// cheaper than an asset-protocol round trip.
+    pub png: String,
+}
+
+/// One small PNG per layer, for the 图层 panel's thumbnail column.
+///
+/// Batched into a single call on purpose: five layers would otherwise be five
+/// IPC round trips plus five lock acquisitions for a couple of kilobytes total.
+///
+/// Called on pixel changes only — end of a stroke, end of a fill, clear, undo,
+/// and any structural edit. Not on parameter changes: Photoshop's thumbnails do
+/// not move when you drag 不透明度 either, because they show content, not
+/// appearance.
+#[tauri::command]
+pub fn layer_thumbs(size: usize, state: State<AppState>) -> Vec<LayerThumb> {
+    let e = state.engine.lock().unwrap();
+    let n = size.clamp(8, 96);
+    e.layers
+        .iter()
+        .filter_map(|l| {
+            let t = e.layer_thumb(l, n, n);
+            let png = io::encode_png_bytes(&t)?;
+            Some(LayerThumb { id: l.p.id.clone(), png: b64(&png) })
+        })
+        .collect()
+}
+
 #[tauri::command]
 pub fn stroke(req: StrokeReq, state: State<AppState>) -> Snapshot {
     {

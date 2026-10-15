@@ -419,9 +419,11 @@ describe('panels hold state, the menu holds actions', () => {
    */
   it('groups one-time setup into a folded 文档 panel', () => {
     // 投影 and 图片源 are both "what kind of document is this": set once.
+    // They are panel *sections* rather than sub-headings now — PS divides a
+    // panel with full-bleed rules, not with small caps.
     expect(src).toMatch(/<Panel id="document" title="文档"/);
-    expect(src).toMatch(/className="sub-head">投影</);
-    expect(src).toMatch(/className="sub-head">天空贴图</);
+    expect(src).toMatch(/<Section title="投影">/);
+    expect(src).toMatch(/<Section title="天空贴图">/);
     // ...and it starts folded, so 图层 is not a scroll away.
     expect(src).toMatch(/START_COLLAPSED: Record<string, boolean> = \{ document: true, export: true \}/);
     expect(src).toMatch(/useState<Record<string, boolean>>\(START_COLLAPSED\)/);
@@ -458,6 +460,140 @@ describe('panels hold state, the menu holds actions', () => {
     // to the app bar and the screen-mode switch to the options bar.
     expect(src).toMatch(/docName=\{/);
     expect(src).toMatch(/<div className="optionsbar">[\s\S]*menu-group segmented/);
+  });
+});
+
+describe('panel contents, laid out the way Photoshop lays them out', () => {
+  /**
+   * The panels used to be flat lists of `label | bare range | coloured number`
+   * on rounded cards. That is a settings page. Photoshop's panels are a
+   * different grammar, and three parts of it are what make the column readable
+   * at a glance:
+   *
+   *   1. sections — a chevron header over a rule that spans the full width
+   *   2. fields   — the value sits in its own inset box, not as tinted text
+   *   3. glyphs   — a panel's own toolbar is icon buttons, so the width goes
+   *                 to the content (here: layer thumbnails)
+   */
+
+  it('divides a panel into sections with a full-bleed rule', () => {
+    expect(src).toMatch(/function Section\(\{ title, children \}/);
+    expect(src).toMatch(/<section className="sect">/);
+    expect(src).toMatch(/<button className="sect-head" aria-expanded=\{open\}/);
+    // Full-bleed: the rule spans the panel while the header text stays inset.
+    // Equal to `.panel-body`'s side padding, which is the whole mechanism.
+    expect(rawStyles).toMatch(/\.sect \{ margin: 0 -9px; \}/);
+    expect(rawStyles).toMatch(/\.sect \+ \.sect \{ border-top: 1px solid var\(--separator\); \}/);
+    expect(rawStyles).toMatch(/\.sect:first-child \{ margin-top: -9px; \}/);
+  });
+
+  it('makes a section header fold, like PS does', () => {
+    // A chevron that does not fold is a lie about affordance.
+    expect(src).toMatch(/const \[open, setOpen\] = useState\(true\);/);
+    expect(src).toMatch(/onClick=\{\(\) => setOpen\(\(v\) => !v\)\}/);
+    expect(src).toMatch(/\{open && <div className="sect-body">\{children\}<\/div>\}/);
+  });
+
+  it('draws the disclosure chevron as an icon, not as text', () => {
+    // ▸ / ▾ are not in every UI font; at 9px on Windows ▾ came out as a speck
+    // that read as a bullet rather than as a control.
+    expect(src).toMatch(/<ToolIcon name=\{collapsed \? 'right' : 'down'\} size=\{12\} \/>/);
+    expect(src).toMatch(/<ToolIcon name=\{open \? 'down' : 'right'\} size=\{12\} \/>/);
+    expect(rawStyles).not.toMatch(/\.chev \{ font-size/);
+  });
+
+  it('gives 属性 three sections instead of one flat list', () => {
+    // PS's Properties panel is 变换 / 对齐并分布 / 快速操作. Ours is the
+    // kind-specific generator, then the two things every layer has.
+    expect(src).toMatch(/<Section title=\{PARAM_SECT\[activeLayer\.kind\]\}>/);
+    expect(src).toMatch(/<Section title="边缘">/);
+    expect(src).toMatch(/<Section title="混合">/);
+    // A paint layer has no parameters of its own; an empty panel reads as
+    // broken, so it explains where its parameters actually live.
+    expect(src).toMatch(/<p className="note">/);
+    expect(rawStyles).toMatch(/\.note \{ margin: 0; font-size: 11px;/);
+  });
+
+  it('puts a value in an inset field, not in tinted text', () => {
+    // The box is what carries "this is a value you own". Coloured text on the
+    // panel surface reads as a caption, which is how it read before.
+    expect(rawStyles).toMatch(/\.row-value \{[\s\S]*?background: var\(--field\);/);
+    expect(rawStyles).toMatch(/\.row-value \{[\s\S]*?border: 1px solid var\(--field-border\);/);
+    expect(rawStyles).toMatch(/\.row-value \{[\s\S]*?font-variant-numeric: tabular-nums;/);
+  });
+
+  it('writes the row label in sentence case', () => {
+    // Uppercase + letter-spacing on every label made the panel shout and made
+    // the values recede — exactly backwards.
+    const label = rawStyles.match(/\.row-label \{[^}]*\}/)![0];
+    expect(label).not.toContain('text-transform');
+    expect(label).not.toContain('letter-spacing');
+  });
+
+  it('fills the slider track from the left, PS style', () => {
+    // A range input's track *is* its background, so one custom property is all
+    // it takes. A wrapper element would clip the thumb.
+    expect(src).toMatch(/function Range\(\{ value, min, max, step = 0\.01, onChange, title \}/);
+    expect(src).toMatch(/const pct = max > min \? \(\(value - min\) \/ \(max - min\)\) \* 100 : 0;/);
+    expect(src).toMatch(/style=\{\{ '--p': `\$\{pct\}%` \} as React\.CSSProperties\}/);
+    expect(rawStyles).toMatch(/linear-gradient\(to right, var\(--accent\) 0 var\(--p, 0%\)/);
+    // `input[type=range].rng`, not `.rng`: the base range rule is an element
+    // plus an attribute selector and outranks a lone class, so a bare `.rng`
+    // silently keeps the options-bar styling and draws no fill at all.
+    expect(rawStyles).toMatch(/^input\[type=range\]\.rng \{/m);
+    expect(rawStyles).not.toMatch(/^\.rng \{/m);
+    // Every panel row goes through it; a bare <input type=range> inside a
+    // panel would come out unfilled and give the panel two slider styles.
+    expect(src).not.toMatch(/<Row[^>]*>\s*<input type="range"/);
+  });
+
+  it('builds the 图层 toolbar out of glyph buttons', () => {
+    expect(src).toMatch(/function IconBtn\(\{ icon, title, onClick, disabled, danger \}/);
+    // A glyph with no label is a guess, so every call site passes a title.
+    expect(src).toMatch(/className=\{`pbtn \$\{danger \? 'danger' : ''\}`\}/);
+    expect(src).toMatch(/aria-label=\{title\}/);
+    for (const icon of ['brush', 'wind', 'box', 'up', 'down', 'trash']) {
+      expect(src, `the layer toolbar is missing ${icon}`).toContain(`icon="${icon}"`);
+    }
+    // The icons have to actually exist in the set, or the button is blank.
+    // `eye-off` is a quoted key (it is not a valid identifier), so the check
+    // has to accept both forms.
+    for (const name of ['wind', 'box', 'trash', 'up', 'down', 'eye', 'eye-off']) {
+      expect(rawIcons, `icons.tsx is missing ${name}`).toMatch(
+        new RegExp(`['"]?${name}['"]?: \\[`));
+    }
+    expect(src).not.toMatch(/layer-tools/);
+  });
+
+  it('shows one thumbnail per layer', () => {
+    // The single most PS-looking thing in the layer panel, and the reason the
+    // text badge that used to sit there was redundant: the names already say
+    // 流向 / 风向 / 障碍物.
+    expect(src).toMatch(/const \[thumbs, setThumbs\] = useState<Record<string, string>>\(\{\}\);/);
+    expect(src).toMatch(/const refreshThumbs = useCallback\(async \(\) => \{/);
+    expect(src).toMatch(/className="layer-thumb"/);
+    expect(src).not.toMatch(/className="badge"/);
+    // Checkerboard behind it, PS's language for "no pixels here yet".
+    expect(rawStyles).toMatch(/\.layer-thumb \{[\s\S]*?background-size: 12px 12px;/);
+    // The column only lines up if the eye has a fixed width too.
+    expect(rawStyles).toMatch(/\.eye \{[\s\S]*?flex: 0 0 18px;/);
+    expect(rawStyles).toMatch(/\.layer-thumb \{[\s\S]*?flex: 0 0 26px;/);
+  });
+
+  it('refreshes thumbnails on pixel changes only', () => {
+    // Photoshop's thumbnails show content, so dragging 不透明度 leaves them
+    // alone. A round trip per slider frame would buy nothing.
+    const api = readFileSync(new URL('./api.ts', import.meta.url), 'utf8');
+    expect(api).toMatch(/layerThumbs: \(size = 32\) =>/);
+    expect(api).toMatch(/invoke<LayerThumb\[\]>\('layer_thumbs', \{ size \}\)/);
+    for (const hook of ['onStrokeEnd', 'onFillEnd']) {
+      expect(src, `${hook} should refresh thumbnails`).toMatch(
+        new RegExp(`${hook}=\\{\\(\\) => \\{ api\\.saveHistory\\(\\); void refreshThumbs\\(\\); \\}\\}`));
+    }
+    expect(src).toMatch(/api\.floodFill\(u, v, magicThreshold, effTarget\)\s*\n\s*\.then\(\(s\) => \{ applySnap\(s\); api\.saveHistory\(\); void refreshThumbs\(\); \}\);/);
+    // Structural edits too: add/remove/reorder changes which picture belongs
+    // to which row.
+    expect(src).toMatch(/void refreshThumbs\(\);\s*\n\s*\}, \[applyUpdate, refreshThumbs\]\);/);
   });
 });
 
@@ -580,8 +716,15 @@ describe('Photoshop "Pro (Dark)" palette', () => {
     expect(root).toContain('--r-lg: 6px');
   });
 
-  it('has no gradients or glow in the chrome', () => {
-    expect(rawStyles).not.toMatch(/linear-gradient/);
+  it('has no decorative gradients or glow in the chrome', () => {
+    // Two gradients exist, and neither decorates a surface: the slider's
+    // filled track (a range input's track *is* its background, so a gradient
+    // is the only way to draw one) and the layer thumbnail's transparency
+    // checkerboard. Anything else appearing here is an "app store" gradient
+    // creeping back in.
+    const owners = [...rawStyles.matchAll(/(?:^|\n)([^\n{}]*)\{[^}]*linear-gradient/g)]
+      .map((m) => m[1].trim());
+    expect(owners.sort()).toEqual(['.layer-thumb', 'input[type=range].rng']);
     expect(rawStyles).not.toMatch(/box-shadow: 0 1px 4px/);
   });
 });

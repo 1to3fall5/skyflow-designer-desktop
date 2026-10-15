@@ -23,6 +23,7 @@ pub fn run() {
             commands::load_reference,
             commands::get_reference_png,
             commands::clear_reference,
+            commands::layer_thumbs,
             commands::stroke,
             commands::flood_fill,
             commands::sample_strength,

@@ -1326,3 +1326,75 @@ fn a_stale_canvas_is_rebuilt_after_a_full_dirty() {
     let (x, y, w, h) = e.dirty_rect();
     assert_eq!((x, y, w, h), (0, 0, 64, 64), "a full rebuild must report the whole canvas");
 }
+
+// ---------------------------------------------------------------------------
+// Layer thumbnails (the 图层 panel's left column)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_thumbnail_is_the_requested_size_for_every_layer_kind() {
+    // The panel column is a fixed width, so a thumbnail that came back at the
+    // canvas size would blow the row apart.
+    let mut e = bare_engine(256);
+    e.add_layer(LayerKind::Wind);
+    e.add_layer(LayerKind::Obstacle);
+    e.composite();
+    assert_eq!(e.layers.len(), 3);
+    for l in e.layers.iter() {
+        let t = e.layer_thumb(l, 32, 32);
+        assert_eq!((t.w, t.h), (32, 32), "thumb size for {:?}", l.p.kind);
+    }
+}
+
+#[test]
+fn an_empty_thumbnail_stays_transparent_and_a_painted_one_does_not() {
+    // Photoshop shows a checkerboard for an empty layer, which only works if
+    // "nothing painted" really comes out as alpha 0. A box filter that averaged
+    // straight (un-premultiplied) channels would still pass the painted half of
+    // this, so both halves are checked.
+    let n = 256;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+    e.composite();
+    e.clear_dirty();
+
+    let empty = e.layer_thumb(e.layer(&id).unwrap(), 32, 32);
+    assert!(empty.data.chunks_exact(4).all(|c| c[3] == 0),
+        "an unpainted layer must come out fully transparent");
+
+    drag(&mut e, 1.0, 1.0, 1);
+    e.composite();
+    let painted = e.layer_thumb(e.layer(&id).unwrap(), 32, 32);
+    assert!(painted.data.chunks_exact(4).any(|c| c[3] > 0),
+        "a painted layer must show something");
+    // A 40px brush on a 256px canvas is 5px of a 32px thumbnail, so this is
+    // also the test that the downscale actually *averages*: point-sampling
+    // would land on the stroke or miss it depending on the sample grid.
+    let lit = painted.data.chunks_exact(4).filter(|c| c[3] > 0).count();
+    assert!(lit >= 4, "a 40px dab should cover a few thumbnail pixels, got {lit}");
+}
+
+#[test]
+fn an_obstacle_thumbnail_shows_its_mask_not_its_buffer() {
+    // An obstacle layer's `buf` is never composited — the composite reads
+    // `obstacle_alpha_plane(mask)`. Thumbnailing `buf` would give every
+    // obstacle layer an identical empty square.
+    let mut e = bare_engine(128);
+    let id = e.add_layer(LayerKind::Obstacle);
+    e.active = id.clone();
+    e.composite();
+
+    let blank = e.layer_thumb(e.layer(&id).unwrap(), 32, 32);
+    assert!(blank.data.chunks_exact(4).all(|c| c[3] == 0),
+        "a fresh obstacle layer has not been painted, so its thumbnail is empty");
+
+    // The mask is created lazily on the first masked stroke.
+    e.stroke(&[(0.5, 0.5), (0.6, 0.5)], 30.0, 1.0, 1.0, false, "mask", 1, 1.0);
+    e.composite();
+    let t = e.layer_thumb(e.layer(&id).unwrap(), 32, 32);
+    let on = t.data.chunks_exact(4).find(|c| c[3] > 200)
+        .expect("the mask stroke has to show up");
+    // Recoloured on the way in: a greyscale mask on a grey panel is invisible.
+    assert!(on[0] > 180 && on[2] > 180, "the mask plate should be light, got {on:?}");
+}

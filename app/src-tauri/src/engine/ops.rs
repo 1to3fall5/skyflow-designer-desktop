@@ -728,6 +728,61 @@ pub fn upscale(src: &Buf, tw: usize, th: usize) -> Buf {
     out
 }
 
+/// Box-filter downscale, for layer thumbnails.
+///
+/// `upscale` point-samples, which is fine when the GPU is going to resample the
+/// result anyway, but wrong for a 32px thumbnail of a 1024px canvas: it reads
+/// one pixel out of every 1024, so a 4px stroke either disappears entirely or
+/// comes out as a dotted line depending on where it lands. Averaging the whole
+/// source block is what makes the thumbnail look like the layer.
+///
+/// Averaged in premultiplied space and un-premultiplied on the way out. The
+/// layer-buffer contract is *straight* alpha, and the unpainted area of a paint
+/// layer is (0,0,0,0) — averaging straight channels would drag that black into
+/// every stroke edge and grey the whole thumbnail out.
+pub fn downscale(src: &Buf, tw: usize, th: usize) -> Buf {
+    // Nothing to average when the target is not smaller; let the bilinear path
+    // handle it rather than dividing by an empty source block.
+    if src.w <= tw || src.h <= th {
+        return upscale(src, tw, th);
+    }
+    let mut out = Buf::new(tw, th);
+    let sx = src.w as f32 / tw as f32;
+    let sy = src.h as f32 / th as f32;
+    out.data.par_chunks_mut(tw * 4).enumerate().for_each(|(y, row)| {
+        let y0 = (y as f32 * sy) as usize;
+        let y1 = ((((y + 1) as f32 * sy) as usize).max(y0 + 1)).min(src.h);
+        for x in 0..tw {
+            let x0 = (x as f32 * sx) as usize;
+            let x1 = ((((x + 1) as f32 * sx) as usize).max(x0 + 1)).min(src.w);
+            let (mut r, mut g, mut b, mut a, mut n) = (0f32, 0f32, 0f32, 0f32, 0f32);
+            for yy in y0..y1 {
+                let base = yy * src.w * 4;
+                for xx in x0..x1 {
+                    let i = base + xx * 4;
+                    let al = src.data[i + 3] as f32 / 255.0;
+                    r += src.data[i] as f32 * al;
+                    g += src.data[i + 1] as f32 * al;
+                    b += src.data[i + 2] as f32 * al;
+                    a += al;
+                    n += 1.0;
+                }
+            }
+            // Fully transparent output stays (0,0,0,0) — the panel draws a
+            // checkerboard behind it, exactly like Photoshop's empty layers.
+            if a <= 1e-6 {
+                continue;
+            }
+            let inv = 1.0 / a;
+            row[x * 4] = (r * inv).clamp(0.0, 255.0) as u8;
+            row[x * 4 + 1] = (g * inv).clamp(0.0, 255.0) as u8;
+            row[x * 4 + 2] = (b * inv).clamp(0.0, 255.0) as u8;
+            row[x * 4 + 3] = ((a / n) * 255.0).clamp(0.0, 255.0) as u8;
+        }
+    });
+    out
+}
+
 pub fn neutral(w: usize, h: usize) -> Buf {
     Buf::filled(w, h, NEUTRAL)
 }

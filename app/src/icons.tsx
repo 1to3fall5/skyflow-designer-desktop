@@ -51,6 +51,47 @@ const PATHS: Record<string, string[]> = {
     'M10 10.5V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2v8',
     'M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15',
   ],
+
+  // --- panel icons -------------------------------------------------------
+  // Photoshop's panels are button-and-icon rows, not rows of words: the layer
+  // panel is a strip of icons for new / delete / reorder, and each row leads
+  // with an eye. Words there would cost the width the thumbnails need.
+
+  // lucide:wind
+  wind: [
+    'M12.8 19.6A2 2 0 1 0 14 16H2',
+    'M17.5 8a2.5 2.5 0 1 1 2 4H2',
+    'M9.8 4.4A2 2 0 1 1 11 8H2',
+  ],
+  // lucide:box
+  box: [
+    'M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z',
+    'm3.3 7 8.7 5 8.7-5',
+    'M12 22V12',
+  ],
+  // lucide:trash-2
+  trash: [
+    'M3 6h18',
+    'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6',
+    'M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2',
+    'M10 11v6',
+    'M14 11v6',
+  ],
+  // lucide:chevron-up / chevron-down / chevron-right
+  up: ['m18 15-6-6-6 6'],
+  down: ['m6 9 6 6 6-6'],
+  right: ['m9 18 6-6-6-6'],
+  // lucide:eye / eye-off. Hand-drawn from the same primitives rather than
+  // copied, so the two are guaranteed to share an outline.
+  eye: [
+    'M2 12c2.2-3.8 5.7-7 10-7s7.8 3.2 10 7c-2.2 3.8-5.7 7-10 7s-7.8-3.2-10-7z',
+    'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
+  ],
+  'eye-off': [
+    'M2 12c2.2-3.8 5.7-7 10-7s7.8 3.2 10 7c-2.2 3.8-5.7 7-10 7s-7.8-3.2-10-7z',
+    'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
+    'm4 4 16 16',
+  ],
 };
 
 export type IconName = keyof typeof PATHS;

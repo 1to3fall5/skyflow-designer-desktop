@@ -220,6 +220,41 @@ impl Engine {
         self.layers.iter().find(|l| l.p.id == id)
     }
 
+    /// A small stand-in for one layer, for the 图层 panel's thumbnail column.
+    ///
+    /// It shows the layer's **own** pixels, not its contribution to the
+    /// composite — which is what Photoshop does, and what makes the column
+    /// readable: dragging a layer up the stack does not change its thumbnail,
+    /// so you can still tell which row you are looking at mid-drag.
+    ///
+    /// What "its own pixels" means differs per kind:
+    ///   * paint    — the stroke buffer. Unpainted area is (0,0,0,0), so the
+    ///                thumbnail shows strokes on transparency, like PS.
+    ///   * wind     — the generated vector field, which is what the layer is.
+    ///   * obstacle — the **mask**. An obstacle layer's `buf` is never drawn
+    ///                (the composite reads `obstacle_alpha_plane(mask)`), so the
+    ///                mask is the only part of it a human recognises.
+    pub fn layer_thumb(&self, l: &LayerData, tw: usize, th: usize) -> Buf {
+        if l.p.kind != LayerKind::Obstacle {
+            return ops::downscale(&l.buf, tw, th);
+        }
+        let Some(m) = l.mask.as_ref() else {
+            return Buf::new(tw, th);
+        };
+        // Recolour first, shrink second: the mask is greyscale, and a grey
+        // thumbnail on a grey panel is unreadable. Averaging the recoloured
+        // buffer is also what gives the shape a soft edge instead of a
+        // point-sampled dotted one.
+        let mut plate = Buf::new(m.w, m.h);
+        for (o, i) in plate.data.chunks_exact_mut(4).zip(m.data.chunks_exact(4)) {
+            o[0] = 226;
+            o[1] = 232;
+            o[2] = 240;
+            o[3] = i[0];
+        }
+        ops::downscale(&plate, tw, th)
+    }
+
     // -- layer management ----------------------------------------------------
 
     pub fn add_layer(&mut self, kind: LayerKind) -> String {
