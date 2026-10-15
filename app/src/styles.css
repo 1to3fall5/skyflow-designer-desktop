@@ -175,9 +175,73 @@ select {
 /* ---------- layout ---------- */
 .app { display: flex; flex-direction: column; height: 100%; }
 
-/* No HTML title bar any more: the window has a native one and it carries the
-   menu (文件 / 编辑 / 视图 / 图层 / 帮助). Keeping a second row of file buttons
-   in HTML was two bars of chrome and a shorter canvas. */
+/* ---------- app bar: menu + window controls, one row ---------- */
+/* `decorations` is off, so there is no native frame and this bar *is* the title
+   bar. Photoshop's Windows chrome is exactly this: 文件 编辑 图像 图层 down the
+   left of a single row, the window buttons down the right. */
+.appbar {
+  flex: 0 0 auto;
+  display: flex; align-items: stretch;
+  height: 34px;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--separator);
+  user-select: none; -webkit-user-select: none;
+}
+.appbar-menus { display: flex; }
+.menu-root { position: relative; display: flex; }
+.menu-btn {
+  background: none; border: none; border-radius: 0;
+  padding: 0 10px; font-size: 12px; color: var(--txt);
+}
+.menu-btn:hover { background: var(--hover); }
+.menu-btn.on { background: var(--hover); color: #fff; }
+
+/* Dropdown. Anchored to its own menu root, not to the bar, so it opens under
+   the label you clicked. */
+.menu-pop {
+  position: absolute; top: 100%; left: 0;
+  min-width: 196px;
+  background: var(--card);
+  border: 1px solid var(--separator);
+  border-radius: var(--r);
+  padding: 4px;
+  box-shadow: 0 12px 32px rgba(0,0,0,.55);
+  z-index: 90;
+  display: flex; flex-direction: column;
+}
+.menu-item {
+  display: flex; align-items: center; gap: 8px;
+  background: none; border: none; border-radius: var(--r-sm);
+  padding: 5px 8px; font-size: 12px; color: var(--txt);
+  text-align: left; white-space: nowrap;
+}
+.menu-item:hover { background: var(--row-selected); color: #fff; }
+/* Fixed-width slot: without it the labels step sideways on ticked rows. */
+.menu-item .tick { width: 11px; flex: 0 0 11px; color: var(--accent); font-size: 10px; }
+.menu-item:hover .tick { color: #fff; }
+.menu-subhead {
+  font-size: 9px; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--txt-faint);
+  padding: 5px 8px 2px;
+}
+.menu-sep { height: 1px; background: var(--separator); margin: 4px 2px; }
+
+/* Drag region: the empty middle. A button inside the drag region is a coin
+   flip between starting a drag and firing its click, so buttons stay out. */
+.appbar-fill { flex: 1; min-width: 0; }
+.appbar-doc {
+  align-self: center;
+  font-size: 11px; color: var(--txt-dim);
+  max-width: 240px; padding: 0 10px;
+}
+.appbar-controls { display: flex; }
+.win-btn {
+  width: 44px; border: none; border-radius: 0;
+  background: none; color: var(--txt-dim); font-size: 11px;
+  padding: 0;
+}
+.win-btn:hover { background: var(--hover); color: var(--txt); }
+.win-btn.close:hover { background: var(--danger); color: #fff; }
 
 /* Segmented control — also used for the screen-mode switch at the right end of
    the options bar, which is where PS puts it. */
@@ -485,9 +549,6 @@ select {
 }
 .st-item { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .st-item.dim { color: var(--fg-mute); }
-/* The document name moved here from the old HTML title bar. Capped so a long
-   path cannot push the rest of the bar off the window. */
-.st-item.doc-name { max-width: 220px; overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
 .statusbar .target-chip { font-weight: 700; }
 .statusbar .busy { color: var(--accent-hi); }
 

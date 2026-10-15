@@ -454,42 +454,70 @@ describe('panels hold state, the menu holds actions', () => {
     // file buttons was two bars of chrome and a shorter canvas.
     expect(src).not.toMatch(/<header className="titlebar">/);
     expect(rawStyles).not.toMatch(/^\.titlebar \{/m);
-    // ...but the two things worth keeping moved rather than vanished.
-    expect(src).toMatch(/st-item doc-name/);
+    // ...but what it held moved rather than vanished: the document name went
+    // to the app bar and the screen-mode switch to the options bar.
+    expect(src).toMatch(/docName=\{/);
     expect(src).toMatch(/<div className="optionsbar">[\s\S]*menu-group segmented/);
   });
 });
 
-describe('native menu bar', () => {
-  it('installs a Tauri menu with the five PS menus', async () => {
-    const rawMenu = readFileSync(new URL('./menu.ts', import.meta.url), 'utf8');
-    expect(src).toMatch(/installMenu\(\{/);
+describe('menu bar merged into the title bar', () => {
+  const rawMenu = readFileSync(new URL('./menu.ts', import.meta.url), 'utf8');
+  const rawBar = readFileSync(new URL('./AppBar.tsx', import.meta.url), 'utf8');
+
+  it('turns window decorations off so there is no separate window bar', () => {
+    // The whole point: one chrome row, not a native frame plus a menu below it.
+    const conf = readFileSync(new URL('../src-tauri/tauri.conf.json', import.meta.url), 'utf8');
+    expect(conf).toMatch(/"decorations": false/);
+    // ...which means the app has to draw its own window buttons.
+    expect(rawBar).toMatch(/win\(\)\.minimize\(\)/);
+    expect(rawBar).toMatch(/win\(\)\.toggleMaximize\(\)/);
+    expect(rawBar).toMatch(/win\(\)\.close\(\)/);
+  });
+
+  it('has the five PS menus', () => {
     for (const label of ['文件', '编辑', '视图', '图层', '帮助']) {
-      expect(rawMenu).toContain(`text: '${label}'`);
+      expect(rawMenu).toContain(`label: '${label}'`);
     }
-    expect(rawMenu).toMatch(/setAsAppMenu\(\)/);
+    expect(src).toMatch(/<AppBar/);
+  });
+
+  it('keeps the drag region away from the buttons', () => {
+    // A button inside a drag region is a coin flip between dragging the window
+    // and firing its click, so the region is a dedicated filler instead.
+    expect(rawBar).toMatch(/className="appbar-fill"\s*\n?\s*data-tauri-drag-region/);
+    expect(rawBar).not.toMatch(/className="appbar"[^>]*data-tauri-drag-region/);
   });
 
   it('routes every menu command through one dispatcher refreshed per render', () => {
-    // The menu is built once; if its actions closed over a render they would
-    // save to a project path from ten minutes ago.
     expect(src).toMatch(/menuCmd\.current = \(cmd: MenuCmd\) =>/);
-    expect(src).toMatch(/run: \(cmd\) => menuCmd\.current\(cmd\)/);
-    // ...and the tick marks follow state.
-    expect(src).toMatch(/menuRef\.current\?\.sync\(\{/);
+    expect(src).toMatch(/run=\{\(cmd\) => menuCmd\.current\(cmd\)\}/);
   });
 
   it('does not register accelerators that the keyboard handler already owns', () => {
     // Binding Ctrl+S here would fire it twice: the WebView still sees the
     // keydown, and `shortcuts.ts` acts on it too.
-    const rawMenu = readFileSync(new URL('./menu.ts', import.meta.url), 'utf8');
-    expect(rawMenu).not.toMatch(/accelerator:/);
+    expect(strip(rawMenu)).not.toMatch(/accelerator/i);
   });
 
   it('puts the recent files in 文件 > 打开最近', () => {
-    const rawMenu = readFileSync(new URL('./menu.ts', import.meta.url), 'utf8');
-    expect(rawMenu).toContain("text: '打开最近'");
-    expect(rawMenu).toMatch(/openRecent\(p\)/);
+    expect(rawMenu).toContain("label: '打开最近'");
+    expect(rawMenu).toMatch(/kind: 'path'/);
+  });
+
+  it('opens by default into the 3D view', () => {
+    // A flowmap only reads as a flowmap once it is moving on a sky.
+    expect(src).toMatch(/useState<ViewMode>\('3d'\)/);
+  });
+
+  it('puts 属性 above 图层, the way PS does', () => {
+    // Contextual to the selected layer, so it belongs at the top of the column
+    // rather than under the list it describes.
+    expect(src).toMatch(/PANEL_IDS = \['props', 'layers',/);
+    const propsAt = src.indexOf('<Panel id="props"');
+    const layersAt = src.indexOf('<Panel id="layers"');
+    expect(propsAt).toBeGreaterThan(0);
+    expect(propsAt).toBeLessThan(layersAt);
   });
 });
 

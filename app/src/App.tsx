@@ -7,7 +7,8 @@ import type { CursorUV } from './cursor';
 import PaintView, { PaintViewHandle } from './components/PaintView';
 import Preview3D, { Preview3DHandle } from './components/Preview3D';
 import { ToolIcon } from './icons';
-import { installMenu, type MenuCmd, type MenuHandle } from './menu';
+import AppBar from './AppBar';
+import type { MenuCmd } from './menu';
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
@@ -26,7 +27,11 @@ const TOOLS: Array<{ tool: Tool; icon: string; label: string; key: string }> = [
  * Right-hand panel ids, in display order.
  *
  * Four questions decided this list:
- *   * is it state you keep touching while painting? -> panel (图层, 属性, 视图)
+ *   * is it state you keep touching while painting? -> panel (属性, 图层, 视图)
+ *
+ * 属性 sits above 图层 the way it does in Photoshop: it is contextual to the
+ * selected layer, so it belongs next to the top of the column where you are
+ * already looking, not below the list it describes.
  *   * is it something you set once per document?    -> panel, folded (文档, 导出)
  *   * is it a file operation?                       -> menu bar
  *   * is it a list of files?                        -> menu bar (打开最近)
@@ -34,7 +39,7 @@ const TOOLS: Array<{ tool: Tool; icon: string; label: string; key: string }> = [
  * three are one-time things, so they are now either folded into 文档 or in the
  * 文件 menu.
  */
-const PANEL_IDS = ['layers', 'props', 'view', 'document', 'export'] as const;
+const PANEL_IDS = ['props', 'layers', 'view', 'document', 'export'] as const;
 type PanelId = typeof PANEL_IDS[number];
 
 /**
@@ -54,7 +59,10 @@ const RESOLUTIONS = [512, 1024, 2048, 4096];
 
 export default function App() {
   const [state, setState] = useState<AppState | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>('split');
+  // 3D on purpose: the flowmap only makes sense once you see it moving on a
+  // sky, and that is what a new user opens the app to look at. The 2D view is
+  // where you *work*, so it is one key away (1) rather than the default.
+  const [viewMode, setViewMode] = useState<ViewMode>('3d');
   const [tool, setTool] = useState<Tool>('brush');
   const [brushSize, setBrushSize] = useState(24);
   const [brushStrength, setBrushStrength] = useState(0.5);
@@ -119,52 +127,12 @@ export default function App() {
 
   // ---------------------------------------------------------------------
   /**
-   * Native menu bar.
-   *
-   * The menu is built once (and again only when the recent-file list changes,
-   * since that is the one thing baked into its structure). Its actions read the
-   * latest state through `menuCmd`, which is refreshed on every render — a menu
-   * action that closed over a stale render would, say, save to the project path
-   * from ten minutes ago.
+   * Menu commands reach the app through this ref, reassigned on every render.
+   * The menu model in `menu.ts` is rebuilt each render too (it is a plain
+   * array), so nothing here can go stale — which is the whole reason this is a
+   * ref rather than a captured closure.
    */
-  const menuRef = useRef<MenuHandle | null>(null);
   const menuCmd = useRef<(cmd: MenuCmd) => void>(() => {});
-  useEffect(() => {
-    let cancelled = false;
-    installMenu({
-      run: (cmd) => menuCmd.current(cmd),
-      recent,
-      openRecent: (p) => void doOpen(p),
-      state: {
-        reference: showReference,
-        flowmap: showFlowMap,
-        arrows: showArrows,
-        anim: animating,
-        panels: shellHidden,
-        mode: viewMode,
-      },
-    }).then((m) => {
-      if (cancelled) return;
-      menuRef.current = m;
-    }).catch(() => {
-      // Not running under Tauri (vitest, plain browser): no menu, no harm.
-    });
-    return () => { cancelled = true; };
-    // `recent` is the only input baked into the menu's structure; everything
-    // else reaches it through `menuRef.current.sync` below.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recent]);
-
-  useEffect(() => {
-    menuRef.current?.sync({
-      reference: showReference,
-      flowmap: showFlowMap,
-      arrows: showArrows,
-      anim: animating,
-      panels: shellHidden,
-      mode: viewMode,
-    });
-  }, [showReference, showFlowMap, showArrows, animating, shellHidden, viewMode]);
 
   // ---------------------------------------------------------------------
   const perfRef = useRef<HTMLSpanElement>(null);
@@ -500,11 +468,7 @@ export default function App() {
 
   if (!state) return <div className="loading">加载中…</div>;
 
-  /**
-   * One entry point for every native-menu action, reassigned on each render so
-   * a menu click can never run against stale state. Keeping it a ref is what
-   * lets the menu itself be built only once.
-   */
+  /** One entry point for every menu action. */
   menuCmd.current = (cmd: MenuCmd) => {
     switch (cmd) {
       case 'file.new': void doNew(); break;
@@ -545,13 +509,25 @@ export default function App() {
 
   return (
     <div className="app">
-      {/* No HTML title bar: the window already has a native one (decorations
-          are on) and it now carries the menu. Duplicating the file buttons
-          here is what made the chrome two rows deep and the canvas shorter —
-          in Photoshop those live in 文件, not in a toolbar. The two things
-          worth keeping from the old bar moved: the screen-mode switch went to
-          the right end of the options bar, and the document name went to the
-          status bar. */}
+      {/* Title bar and menu bar are one row: `decorations` is off, so the
+          window has no frame of its own and this bar carries both the menus
+          and the minimise / maximise / close buttons. Always visible — Tab
+          hides the tool chrome, not the window controls. */}
+      <AppBar
+        recent={recent}
+        docName={state.project_path ? state.project_path.split(/[\\/]/).pop()! : '未命名工程'}
+        dirty={!state.project_path}
+        state={{
+          reference: showReference,
+          flowmap: showFlowMap,
+          arrows: showArrows,
+          anim: animating,
+          panels: shellHidden,
+          mode: viewMode,
+        }}
+        run={(cmd) => menuCmd.current(cmd)}
+        openPath={(p) => void doOpen(p)}
+      />
 
       {!shellHidden && (
         <div className="optionsbar">
@@ -715,6 +691,48 @@ export default function App() {
 
         {!shellHidden && (
           <aside className="panels">
+            {activeLayer && (
+              <Panel id="props" title={`${KIND_META[activeLayer.kind].label}属性`}
+                collapsed={!!collapsed.props} onToggle={() => togglePanel('props')}>
+                {activeLayer.kind === 'wind' && (
+                  <>
+                    <Row label="方向" value={`${activeLayer.direction | 0}°`}>
+                      <input type="range" min={0} max={360} value={activeLayer.direction}
+                        onChange={(e) => updateLayer(activeLayer.id, { direction: Number(e.target.value) })} />
+                    </Row>
+                    <Row label="强度" value={`${Math.round(activeLayer.strength * 100)}%`}>
+                      <input type="range" min={0} max={1} step={0.01} value={activeLayer.strength}
+                        onChange={(e) => updateLayer(activeLayer.id, { strength: Number(e.target.value) })} />
+                    </Row>
+                  </>
+                )}
+                {activeLayer.kind === 'obstacle' && (
+                  <>
+                    <Row label="扰动">
+                      <button className={activeLayer.disturbance_enabled ? 'toggle on' : 'toggle'}
+                        onClick={() => updateLayer(activeLayer.id, { disturbance_enabled: !activeLayer.disturbance_enabled })}>
+                        {activeLayer.disturbance_enabled ? '已启用' : '已关闭'}
+                      </button>
+                    </Row>
+                    {activeLayer.disturbance_enabled && (
+                      <Row label="范围" value={`${Math.round(activeLayer.disturbance * 100)}%`}>
+                        <input type="range" min={0} max={1} step={0.05} value={activeLayer.disturbance}
+                          onChange={(e) => updateLayer(activeLayer.id, { disturbance: Number(e.target.value) })} />
+                      </Row>
+                    )}
+                  </>
+                )}
+                <Row label="模糊" value={String(activeLayer.blur | 0)}>
+                  <input type="range" min={0} max={64} value={activeLayer.blur}
+                    onChange={(e) => updateLayer(activeLayer.id, { blur: Number(e.target.value) })} />
+                </Row>
+                <Row label="不透明度" value={`${Math.round(activeLayer.opacity * 100)}%`}>
+                  <input type="range" min={0} max={1} step={0.01} value={activeLayer.opacity}
+                    onChange={(e) => updateLayer(activeLayer.id, { opacity: Number(e.target.value) })} />
+                </Row>
+              </Panel>
+            )}
+
             <Panel id="layers" title="图层" grow
               collapsed={!!collapsed.layers} onToggle={() => togglePanel('layers')}>
               <div className="layer-tools">
@@ -773,48 +791,6 @@ export default function App() {
                 })}
               </div>
             </Panel>
-
-            {activeLayer && (
-              <Panel id="props" title={`${KIND_META[activeLayer.kind].label}属性`}
-                collapsed={!!collapsed.props} onToggle={() => togglePanel('props')}>
-                {activeLayer.kind === 'wind' && (
-                  <>
-                    <Row label="方向" value={`${activeLayer.direction | 0}°`}>
-                      <input type="range" min={0} max={360} value={activeLayer.direction}
-                        onChange={(e) => updateLayer(activeLayer.id, { direction: Number(e.target.value) })} />
-                    </Row>
-                    <Row label="强度" value={`${Math.round(activeLayer.strength * 100)}%`}>
-                      <input type="range" min={0} max={1} step={0.01} value={activeLayer.strength}
-                        onChange={(e) => updateLayer(activeLayer.id, { strength: Number(e.target.value) })} />
-                    </Row>
-                  </>
-                )}
-                {activeLayer.kind === 'obstacle' && (
-                  <>
-                    <Row label="扰动">
-                      <button className={activeLayer.disturbance_enabled ? 'toggle on' : 'toggle'}
-                        onClick={() => updateLayer(activeLayer.id, { disturbance_enabled: !activeLayer.disturbance_enabled })}>
-                        {activeLayer.disturbance_enabled ? '已启用' : '已关闭'}
-                      </button>
-                    </Row>
-                    {activeLayer.disturbance_enabled && (
-                      <Row label="范围" value={`${Math.round(activeLayer.disturbance * 100)}%`}>
-                        <input type="range" min={0} max={1} step={0.05} value={activeLayer.disturbance}
-                          onChange={(e) => updateLayer(activeLayer.id, { disturbance: Number(e.target.value) })} />
-                      </Row>
-                    )}
-                  </>
-                )}
-                <Row label="模糊" value={String(activeLayer.blur | 0)}>
-                  <input type="range" min={0} max={64} value={activeLayer.blur}
-                    onChange={(e) => updateLayer(activeLayer.id, { blur: Number(e.target.value) })} />
-                </Row>
-                <Row label="不透明度" value={`${Math.round(activeLayer.opacity * 100)}%`}>
-                  <input type="range" min={0} max={1} step={0.01} value={activeLayer.opacity}
-                    onChange={(e) => updateLayer(activeLayer.id, { opacity: Number(e.target.value) })} />
-                </Row>
-              </Panel>
-            )}
 
             {/* Everything that used to hang over the canvas. The toggles are
                 plain checkboxes rather than icon buttons because there is no
@@ -929,12 +905,8 @@ export default function App() {
       </main>
 
       <footer className="statusbar">
-        {/* Document name first — PS shows it on the document tab, and the HTML
-            title bar that used to hold it is gone. */}
-        <span className="st-item doc-name ellipsis" title={state.project_path ?? undefined}>
-          {state.project_path ? state.project_path.split(/[\\/]/).pop() : '未命名工程'}
-          {state.project_path ? '' : ' *'}
-        </span>
+        {/* The document name moved up to the app bar (PS puts it on the title
+            bar / document tab); this row is measurements only. */}
         <span className="st-item">{state.size}²</span>
         <span className="st-item">缩放 {Math.round(zoom2d * 100)}%</span>
         <span className="st-item" ref={perfRef} title="单次全图层合成耗时">合成 —</span>
