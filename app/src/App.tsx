@@ -7,6 +7,7 @@ import type { CursorUV } from './cursor';
 import PaintView, { PaintViewHandle } from './components/PaintView';
 import Preview3D, { Preview3DHandle } from './components/Preview3D';
 import { ToolIcon } from './icons';
+import { installMenu, type MenuCmd, type MenuHandle } from './menu';
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
@@ -21,9 +22,27 @@ const TOOLS: Array<{ tool: Tool; icon: string; label: string; key: string }> = [
   { tool: 'pan', icon: 'hand', label: '平移', key: 'H' },
 ];
 
-/** Right-hand panel ids, in display order. */
-const PANEL_IDS = ['layers', 'props', 'projection', 'source', 'export', 'recent'] as const;
+/**
+ * Right-hand panel ids, in display order.
+ *
+ * Four questions decided this list:
+ *   * is it state you keep touching while painting? -> panel (图层, 属性, 视图)
+ *   * is it something you set once per document?    -> panel, folded (文档, 导出)
+ *   * is it a file operation?                       -> menu bar
+ *   * is it a list of files?                        -> menu bar (打开最近)
+ * `projection` and `source` used to be their own panels and `recent` too; all
+ * three are one-time things, so they are now either folded into 文档 or in the
+ * 文件 menu.
+ */
+const PANEL_IDS = ['layers', 'props', 'view', 'document', 'export'] as const;
 type PanelId = typeof PANEL_IDS[number];
+
+/**
+ * Panels that start folded. Document setup and export are set once and then
+ * ignored for the rest of the session; an open panel for them is just a scroll
+ * you have to get past to reach 图层.
+ */
+const START_COLLAPSED: Record<string, boolean> = { document: true, export: true };
 
 const KIND_META: Record<LayerKind, { label: string; color: string }> = {
   paint: { label: '流向', color: '#10b981' },
@@ -71,8 +90,8 @@ export default function App() {
   const [refSrc, setRefSrc] = useState<string | null>(null);
 
   // ---- shell layout (Photoshop-style) ----
-  /** Which right-hand panels are folded. Nothing starts folded. */
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  /** Which right-hand panels are folded. See `START_COLLAPSED`. */
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(START_COLLAPSED);
   /** Tab: hide the toolbox, the panels and the options bar. PS calls this
    *  "collapse all panels" and it is the single most useful key when painting. */
   const [shellHidden, setShellHidden] = useState(false);
@@ -97,6 +116,55 @@ export default function App() {
   // Pointer-stroke identity for the 3D painter. Retired on every paint-end, so
   // one drag counts as one stroke no matter how many segments it spans.
   const stroke3d = useRef(nextStrokeId());
+
+  // ---------------------------------------------------------------------
+  /**
+   * Native menu bar.
+   *
+   * The menu is built once (and again only when the recent-file list changes,
+   * since that is the one thing baked into its structure). Its actions read the
+   * latest state through `menuCmd`, which is refreshed on every render — a menu
+   * action that closed over a stale render would, say, save to the project path
+   * from ten minutes ago.
+   */
+  const menuRef = useRef<MenuHandle | null>(null);
+  const menuCmd = useRef<(cmd: MenuCmd) => void>(() => {});
+  useEffect(() => {
+    let cancelled = false;
+    installMenu({
+      run: (cmd) => menuCmd.current(cmd),
+      recent,
+      openRecent: (p) => void doOpen(p),
+      state: {
+        reference: showReference,
+        flowmap: showFlowMap,
+        arrows: showArrows,
+        anim: animating,
+        panels: shellHidden,
+        mode: viewMode,
+      },
+    }).then((m) => {
+      if (cancelled) return;
+      menuRef.current = m;
+    }).catch(() => {
+      // Not running under Tauri (vitest, plain browser): no menu, no harm.
+    });
+    return () => { cancelled = true; };
+    // `recent` is the only input baked into the menu's structure; everything
+    // else reaches it through `menuRef.current.sync` below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recent]);
+
+  useEffect(() => {
+    menuRef.current?.sync({
+      reference: showReference,
+      flowmap: showFlowMap,
+      arrows: showArrows,
+      anim: animating,
+      panels: shellHidden,
+      mode: viewMode,
+    });
+  }, [showReference, showFlowMap, showArrows, animating, shellHidden, viewMode]);
 
   // ---------------------------------------------------------------------
   const perfRef = useRef<HTMLSpanElement>(null);
@@ -432,39 +500,58 @@ export default function App() {
 
   if (!state) return <div className="loading">加载中…</div>;
 
+  /**
+   * One entry point for every native-menu action, reassigned on each render so
+   * a menu click can never run against stale state. Keeping it a ref is what
+   * lets the menu itself be built only once.
+   */
+  menuCmd.current = (cmd: MenuCmd) => {
+    switch (cmd) {
+      case 'file.new': void doNew(); break;
+      case 'file.open': void doOpen(); break;
+      case 'file.save': void doSave(false); break;
+      case 'file.saveAs': void doSave(true); break;
+      case 'file.import': void importImage(); break;
+      case 'file.export': void doExport(); break;
+
+      case 'edit.undo': structural(api.undo()); break;
+      case 'edit.redo': structural(api.redo()); break;
+      case 'edit.clear':
+        if (activeLayer) structural(api.clearLayer(activeLayer.id));
+        break;
+
+      case 'view.reference': setShowReference((v) => !v); break;
+      case 'view.flowmap': setShowFlowMap((v) => !v); break;
+      case 'view.arrows': setShowArrows((v) => !v); break;
+      case 'view.anim': setAnimating((v) => !v); break;
+      case 'view.panels': setShellHidden((v) => !v); break;
+      case 'view.2d': setViewMode('2d'); break;
+      case 'view.split': setViewMode('split'); break;
+      case 'view.3d': setViewMode('3d'); break;
+
+      case 'layer.paint': structural(api.addLayer('paint')); break;
+      case 'layer.wind': structural(api.addLayer('wind')); break;
+      case 'layer.obstacle': structural(api.addLayer('obstacle')); break;
+      case 'layer.up': moveActive(-1); break;
+      case 'layer.down': moveActive(1); break;
+      case 'layer.delete':
+        if (activeLayer && state.layers.length > 1) structural(api.removeLayer(activeLayer.id));
+        break;
+
+      case 'help.shortcuts': setShowShortcuts((v) => !v); break;
+    }
+  };
+
+
   return (
     <div className="app">
-      <header className="titlebar">
-        <div className="brand">
-          <span className="brand-mark" />
-          <b>SkyFlow</b><span className="brand-sub">Designer</span>
-        </div>
-
-        <div className="menu-group">
-          <button onClick={doNew}>新建</button>
-          <button onClick={() => doOpen()}>打开</button>
-          <button onClick={() => doSave(false)}>保存</button>
-          <button onClick={() => doSave(true)}>另存为</button>
-        </div>
-        <div className="menu-group">
-          <button onClick={() => importImage()}>导入天空图</button>
-          <button className="primary" onClick={doExport}>导出贴图</button>
-        </div>
-
-        <div className="spacer" />
-
-        <div className="menu-group segmented">
-          {(['2d', 'split', '3d'] as ViewMode[]).map((m) => (
-            <button key={m} className={viewMode === m ? 'on' : ''} onClick={() => setViewMode(m)}>
-              {m === '2d' ? '2D 绘制' : m === 'split' ? '分屏' : '3D 预览'}
-            </button>
-          ))}
-        </div>
-        <div className="project-name">
-          {state.project_path ? state.project_path.split(/[\\/]/).pop() : '未命名工程'}
-          {state.project_path ? '' : ' *'}
-        </div>
-      </header>
+      {/* No HTML title bar: the window already has a native one (decorations
+          are on) and it now carries the menu. Duplicating the file buttons
+          here is what made the chrome two rows deep and the canvas shorter —
+          in Photoshop those live in 文件, not in a toolbar. The two things
+          worth keeping from the old bar moved: the screen-mode switch went to
+          the right end of the options bar, and the document name went to the
+          status bar. */}
 
       {!shellHidden && (
         <div className="optionsbar">
@@ -504,6 +591,18 @@ export default function App() {
               <option value="composite">合成结果</option>
             </select>
           </div>
+
+          <div className="spacer" />
+
+          {/* Far right end of the options bar is where PS puts the screen-mode
+              switch. It used to sit in the HTML title bar, which is gone. */}
+          <div className="menu-group segmented">
+            {(['2d', 'split', '3d'] as ViewMode[]).map((m) => (
+              <button key={m} className={viewMode === m ? 'on' : ''} onClick={() => setViewMode(m)}>
+                {m === '2d' ? '2D 绘制' : m === 'split' ? '分屏' : '3D 预览'}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
@@ -524,31 +623,11 @@ export default function App() {
           </nav>
         )}
 
+        {/* Nothing floats over the canvas any more. The four view toggles and
+            their five sliders moved into the 视图 panel — Photoshop never hangs
+            controls over the artwork, and a bar down the middle of a skybox is
+            exactly the thing you are trying to look at. */}
         <div className="workspace" ref={workspaceRef}>
-          {/* ---- floating viewport toolbar ---- */}
-          <div className="float-bar">
-            <IconBtn on={showReference} onClick={() => setShowReference((v) => !v)} label="显示贴图">▤</IconBtn>
-            <IconBtn on={showFlowMap} onClick={() => setShowFlowMap((v) => !v)} label="叠加 Flowmap">◫</IconBtn>
-            <IconBtn on={animating} onClick={() => setAnimating((v) => !v)} label="播放动画">▶</IconBtn>
-            <IconBtn on={showArrows} onClick={() => setShowArrows((v) => !v)} label="流向箭头">➤</IconBtn>
-            {showReference && (
-              <Slider label="贴图" value={referenceOpacity} onChange={setReferenceOpacity} />
-            )}
-            {showFlowMap && (
-              <Slider label="叠加" value={flowMapOpacity} onChange={setFlowMapOpacity} />
-            )}
-            {animating && (
-              <>
-                <Slider label="速度" value={speed} min={0} max={2} step={0.05} onChange={setSpeed} />
-                <Slider label="强度" value={distortion} min={0} max={0.5} step={0.01} onChange={setDistortion} />
-              </>
-            )}
-            {showArrows && (
-              <Slider label="密度" value={arrowDensity} min={16} max={128} step={4}
-                onChange={setArrowDensity} display={String(arrowDensity)} />
-            )}
-          </div>
-
           <div className={`pane ${viewMode === '3d' ? 'hidden' : ''}`} style={{ flex: paneFlex('2d') }}>
             <PaintView
               ref={paintRef}
@@ -737,8 +816,61 @@ export default function App() {
               </Panel>
             )}
 
-            <Panel id="projection" title="投影"
-              collapsed={!!collapsed.projection} onToggle={() => togglePanel('projection')}>
+            {/* Everything that used to hang over the canvas. The toggles are
+                plain checkboxes rather than icon buttons because there is no
+                longer a floating bar to make them cryptic — and each one only
+                shows its own parameter, so the panel stays short. */}
+            <Panel id="view" title="视图"
+              collapsed={!!collapsed.view} onToggle={() => togglePanel('view')}>
+              <div className="checks">
+                <label><input type="checkbox" checked={showReference}
+                  onChange={(e) => setShowReference(e.target.checked)} /> 天空贴图</label>
+                <label><input type="checkbox" checked={showFlowMap}
+                  onChange={(e) => setShowFlowMap(e.target.checked)} /> 叠加 Flowmap</label>
+                <label><input type="checkbox" checked={showArrows}
+                  onChange={(e) => setShowArrows(e.target.checked)} /> 流向箭头</label>
+                <label><input type="checkbox" checked={animating}
+                  onChange={(e) => setAnimating(e.target.checked)} /> 播放动画</label>
+              </div>
+
+              {showReference && (
+                <Row label="贴图" value={`${Math.round(referenceOpacity * 100)}%`}>
+                  <input type="range" min={0} max={1} step={0.01} value={referenceOpacity}
+                    onChange={(e) => setReferenceOpacity(Number(e.target.value))} />
+                </Row>
+              )}
+              {showFlowMap && (
+                <Row label="叠加" value={`${Math.round(flowMapOpacity * 100)}%`}>
+                  <input type="range" min={0} max={1} step={0.01} value={flowMapOpacity}
+                    onChange={(e) => setFlowMapOpacity(Number(e.target.value))} />
+                </Row>
+              )}
+              {showArrows && (
+                <Row label="密度" value={String(arrowDensity)}>
+                  <input type="range" min={16} max={128} step={4} value={arrowDensity}
+                    onChange={(e) => setArrowDensity(Number(e.target.value))} />
+                </Row>
+              )}
+              {animating && (
+                <>
+                  <Row label="速度" value={speed.toFixed(2)}>
+                    <input type="range" min={0} max={2} step={0.05} value={speed}
+                      onChange={(e) => setSpeed(Number(e.target.value))} />
+                  </Row>
+                  <Row label="强度" value={distortion.toFixed(2)}>
+                    <input type="range" min={0} max={0.5} step={0.01} value={distortion}
+                      onChange={(e) => setDistortion(Number(e.target.value))} />
+                  </Row>
+                </>
+              )}
+            </Panel>
+
+            {/* 投影 and 图片源 are both "what kind of document is this": set
+                once, then never touched again while painting. One folded panel
+                instead of two open ones. */}
+            <Panel id="document" title="文档"
+              collapsed={!!collapsed.document} onToggle={() => togglePanel('document')}>
+              <div className="sub-head">投影</div>
               <div className="seg">
                 {([['equirectangular', '球面'], ['polar', '极坐标'], ['planar', '平面']] as const).map(([k, label]) => (
                   <button key={k} className={state.projection === k ? 'on' : ''}
@@ -755,10 +887,8 @@ export default function App() {
                     }} />
                 </Row>
               )}
-            </Panel>
 
-            <Panel id="source" title="图片源"
-              collapsed={!!collapsed.source} onToggle={() => togglePanel('source')}>
+              <div className="sub-head">天空贴图</div>
               <button className="dropzone" onClick={() => importImage()}>
                 <span>点击选择天空贴图</span>
                 <small>等距柱状投影 2:1 / 极坐标 / 平面</small>
@@ -790,24 +920,21 @@ export default function App() {
               </div>
               <button className="primary wide" onClick={doExport}>导出 Flowmap</button>
             </Panel>
-
-            {recent.length > 0 && (
-              <Panel id="recent" title="最近打开"
-                collapsed={!!collapsed.recent} onToggle={() => togglePanel('recent')}>
-                <div className="recent">
-                  {recent.map((p) => (
-                    <button key={p} className="link ellipsis" title={p} onClick={() => doOpen(p)}>
-                      {p.split(/[\\/]/).pop()}
-                    </button>
-                  ))}
-                </div>
-              </Panel>
-            )}
+            {/* 最近打开 is gone from here on purpose: it is 文件 > 打开最近 now,
+                which is where every program with a File menu puts it. A list of
+                file paths is not document state and does not belong in the
+                panel column. */}
           </aside>
         )}
       </main>
 
       <footer className="statusbar">
+        {/* Document name first — PS shows it on the document tab, and the HTML
+            title bar that used to hold it is gone. */}
+        <span className="st-item doc-name ellipsis" title={state.project_path ?? undefined}>
+          {state.project_path ? state.project_path.split(/[\\/]/).pop() : '未命名工程'}
+          {state.project_path ? '' : ' *'}
+        </span>
         <span className="st-item">{state.size}²</span>
         <span className="st-item">缩放 {Math.round(zoom2d * 100)}%</span>
         <span className="st-item" ref={perfRef} title="单次全图层合成耗时">合成 —</span>
@@ -881,7 +1008,3 @@ function Slider({ label, value, min = 0, max = 1, step = 0.01, onChange, display
   );
 }
 
-function IconBtn({ on, onClick, label, children }:
-  { on: boolean; onClick: () => void; label: string; children: React.ReactNode }) {
-  return <button className={`icon-btn ${on ? 'on' : ''}`} title={label} onClick={onClick}>{children}</button>;
-}

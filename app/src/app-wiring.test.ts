@@ -409,6 +409,90 @@ describe('Photoshop-style shell', () => {
   });
 });
 
+describe('panels hold state, the menu holds actions', () => {
+  /**
+   * The panel column had six sections, and three of them were not document
+   * state: 图片源 duplicated the 导入天空图 button, 导出 duplicated 导出贴图, and
+   * 最近打开 is File > Open Recent in any program that has a File menu. PS keeps
+   * panels for what you keep touching (图层, 属性, 视图) and puts one-time
+   * operations in the menu bar.
+   */
+  it('groups one-time setup into a folded 文档 panel', () => {
+    // 投影 and 图片源 are both "what kind of document is this": set once.
+    expect(src).toMatch(/<Panel id="document" title="文档"/);
+    expect(src).toMatch(/className="sub-head">投影</);
+    expect(src).toMatch(/className="sub-head">天空贴图</);
+    // ...and it starts folded, so 图层 is not a scroll away.
+    expect(src).toMatch(/START_COLLAPSED: Record<string, boolean> = \{ document: true, export: true \}/);
+    expect(src).toMatch(/useState<Record<string, boolean>>\(START_COLLAPSED\)/);
+  });
+
+  it('no longer carries a 最近打开 panel', () => {
+    // It is 文件 > 打开最近 now. A list of paths is not document state.
+    expect(src).not.toMatch(/id="recent"/);
+    expect(src).not.toMatch(/PANEL_IDS = \[[^\]]*'recent'/);
+  });
+
+  it('moves the view toggles off the canvas and into a 视图 panel', () => {
+    expect(src).toMatch(/<Panel id="view" title="视图"/);
+    // All four, as checkboxes — no floating bar to make icons legible.
+    for (const what of ['showReference', 'showFlowMap', 'showArrows', 'animating']) {
+      expect(src, `${what} should have a checkbox`).toMatch(
+        new RegExp(`checked=\\{${what}\\}`));
+    }
+  });
+
+  it('keeps nothing floating over the canvas', () => {
+    // The bar across the middle of a skybox hid the thing you were painting.
+    expect(src).not.toMatch(/className="float-bar"/);
+    expect(rawStyles).not.toMatch(/^\.float-bar \{/m);
+    expect(src).not.toMatch(/icon-btn/);
+  });
+
+  it('drops the duplicate HTML title bar', () => {
+    // The window has a native one and it carries the menu; a second row of
+    // file buttons was two bars of chrome and a shorter canvas.
+    expect(src).not.toMatch(/<header className="titlebar">/);
+    expect(rawStyles).not.toMatch(/^\.titlebar \{/m);
+    // ...but the two things worth keeping moved rather than vanished.
+    expect(src).toMatch(/st-item doc-name/);
+    expect(src).toMatch(/<div className="optionsbar">[\s\S]*menu-group segmented/);
+  });
+});
+
+describe('native menu bar', () => {
+  it('installs a Tauri menu with the five PS menus', async () => {
+    const rawMenu = readFileSync(new URL('./menu.ts', import.meta.url), 'utf8');
+    expect(src).toMatch(/installMenu\(\{/);
+    for (const label of ['文件', '编辑', '视图', '图层', '帮助']) {
+      expect(rawMenu).toContain(`text: '${label}'`);
+    }
+    expect(rawMenu).toMatch(/setAsAppMenu\(\)/);
+  });
+
+  it('routes every menu command through one dispatcher refreshed per render', () => {
+    // The menu is built once; if its actions closed over a render they would
+    // save to a project path from ten minutes ago.
+    expect(src).toMatch(/menuCmd\.current = \(cmd: MenuCmd\) =>/);
+    expect(src).toMatch(/run: \(cmd\) => menuCmd\.current\(cmd\)/);
+    // ...and the tick marks follow state.
+    expect(src).toMatch(/menuRef\.current\?\.sync\(\{/);
+  });
+
+  it('does not register accelerators that the keyboard handler already owns', () => {
+    // Binding Ctrl+S here would fire it twice: the WebView still sees the
+    // keydown, and `shortcuts.ts` acts on it too.
+    const rawMenu = readFileSync(new URL('./menu.ts', import.meta.url), 'utf8');
+    expect(rawMenu).not.toMatch(/accelerator:/);
+  });
+
+  it('puts the recent files in 文件 > 打开最近', () => {
+    const rawMenu = readFileSync(new URL('./menu.ts', import.meta.url), 'utf8');
+    expect(rawMenu).toContain("text: '打开最近'");
+    expect(rawMenu).toMatch(/openRecent\(p\)/);
+  });
+});
+
 describe('Photoshop "Pro (Dark)" palette', () => {
   /**
    * Values taken from PhotoCraft's `crates/ui-egui/src/theme.rs`

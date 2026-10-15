@@ -175,33 +175,23 @@ select {
 /* ---------- layout ---------- */
 .app { display: flex; flex-direction: column; height: 100%; }
 
-.titlebar {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 8px 14px;
-  background: var(--bg-1);
-  border-bottom: 1px solid var(--line);
-  flex: 0 0 auto;
-}
-.brand { display: flex; align-items: center; gap: 7px; font-size: 14px; }
-.brand b { font-weight: 700; letter-spacing: -.2px; }
-.brand-sub { color: var(--accent-hi); font-weight: 600; }
-/* Flat, no gradient, no glow: Photoshop chrome has neither. */
-.brand-mark {
-  width: 18px; height: 18px; border-radius: var(--r-sm);
-  background: var(--accent);
-}
-.menu-group { display: flex; gap: 4px; }
+/* No HTML title bar any more: the window has a native one and it carries the
+   menu (文件 / 编辑 / 视图 / 图层 / 帮助). Keeping a second row of file buttons
+   in HTML was two bars of chrome and a shorter canvas. */
+
+/* Segmented control — also used for the screen-mode switch at the right end of
+   the options bar, which is where PS puts it. */
+.menu-group { display: flex; gap: 4px; flex: 0 0 auto; }
 .menu-group.segmented button { border-radius: 0; }
 .menu-group.segmented button:first-child { border-radius: var(--r) 0 0 var(--r); }
 .menu-group.segmented button:last-child { border-radius: 0 var(--r) var(--r) 0; }
 .menu-group.segmented button + button { border-left: none; }
-.project-name { color: var(--fg-mute); font-size: 11px; }
 
 .body { flex: 1; display: flex; min-height: 0; }
 
 /* ---------- options bar: follows the selected tool ---------- */
+/* Topmost chrome row now: tool name + its parameters on the left, screen mode
+   on the far right. Photoshop's options bar is exactly this shape. */
 .optionsbar {
   flex: 0 0 auto;
   display: flex; align-items: center; gap: 12px;
@@ -361,8 +351,18 @@ select {
   cursor: help; white-space: nowrap;
 }
 
-.checks { display: flex; gap: 12px; font-size: 11px; color: var(--fg-dim); }
-.checks label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+/* View toggles. Two columns: four one-word labels read faster than four icons
+   did, and there is no floating bar to explain them any more. */
+.checks { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; font-size: 11px; color: var(--fg-dim); }
+.checks label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
+/* Section heading inside a panel. PS panels do this (Properties is all
+   sections) and it is what lets 文档 hold both 投影 and 天空贴图. */
+.sub-head {
+  font-size: 9px; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--fg-mute);
+  margin: 10px 0 6px;
+}
+.panel-body > .sub-head:first-child { margin-top: 0; }
 .recent { display: flex; flex-direction: column; gap: 2px; }
 
 /* ---------- workspace ---------- */
@@ -463,26 +463,9 @@ select {
 
 .preview3d { flex: 1; width: 100%; height: 100%; min-width: 0; }
 
-.float-bar {
-  position: absolute;
-  top: 10px; left: 50%;
-  transform: translateX(-50%);
-  z-index: 30;
-  display: flex; align-items: center; gap: 8px;
-  background: rgba(22,22,26,.82);
-  backdrop-filter: blur(10px);
-  border: 1px solid var(--line);
-  border-radius: var(--r-lg);
-  padding: 5px 8px;
-  box-shadow: 0 8px 26px rgba(0,0,0,.45);
-  max-width: calc(100% - 24px);
-  flex-wrap: wrap;
-}
-.icon-btn {
-  width: 28px; height: 26px;
-  display: flex; align-items: center; justify-content: center;
-  padding: 0; font-size: 13px;
-}
+/* Nothing floats over the canvas: the view toggles and their parameters live in
+   the 视图 panel now. A bar across the middle of a skybox covers the one thing
+   you are trying to look at, and PS does not hang controls over the artwork. */
 .slider { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--fg-dim); }
 .slider input[type=range] { width: 74px; }
 .slider b { color: var(--accent-hi); font-variant-numeric: tabular-nums; min-width: 30px; text-align: right; }
@@ -502,6 +485,9 @@ select {
 }
 .st-item { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .st-item.dim { color: var(--fg-mute); }
+/* The document name moved here from the old HTML title bar. Capped so a long
+   path cannot push the rest of the bar off the window. */
+.st-item.doc-name { max-width: 220px; overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
 .statusbar .target-chip { font-weight: 700; }
 .statusbar .busy { color: var(--accent-hi); }
 
