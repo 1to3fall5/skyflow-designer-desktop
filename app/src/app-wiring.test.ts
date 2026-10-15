@@ -544,7 +544,7 @@ describe('panel contents, laid out the way Photoshop lays them out', () => {
   it('fills the slider track from the left, PS style', () => {
     // A range input's track *is* its background, so one custom property is all
     // it takes. A wrapper element would clip the thumb.
-    expect(src).toMatch(/function Range\(\{ value, min, max, step = 0\.01, onChange, title \}/);
+    expect(src).toMatch(/function Range\(\{ value, min, max, step = 0\.01, onChange, title, disabled \}/);
     expect(src).toMatch(/const pct = max > min \? \(\(value - min\) \/ \(max - min\)\) \* 100 : 0;/);
     expect(src).toMatch(/style=\{\{ '--p': `\$\{pct\}%` \} as React\.CSSProperties\}/);
     expect(rawStyles).toMatch(/linear-gradient\(to right, var\(--accent\) 0 var\(--p, 0%\)/);
@@ -618,6 +618,71 @@ describe('panel contents, laid out the way Photoshop lays them out', () => {
     // Structural edits too: add/remove/reorder changes which picture belongs
     // to which row.
     expect(src).toMatch(/void refreshThumbs\(\);\s*\n\s*\}, \[applyUpdate, refreshThumbs\]\);/);
+  });
+});
+
+describe('a control that does not apply is dimmed, not removed', () => {
+  /**
+   * Conditional controls are what make a panel jump. Ticking 叠加 Flowmap in
+   * 视图 used to *insert* a section — header, rule and all — plus a row, which
+   * shoved the whole column down by ~60px. You click a checkbox and the thing
+   * you were about to click has moved out from under the pointer.
+   *
+   * Photoshop's rule is the opposite: a panel has a fixed set of controls and
+   * greys out the ones that do not apply right now. Constant height is also
+   * more informative — it says 叠加 Flowmap *has* an opacity at all, which a
+   * row that only exists while it is on can never tell you.
+   */
+
+  it('renders 参数 rows unconditionally and gates them with `off`', () => {
+    // The bug: `<Section title="参数">` was inside
+    // `{(showReference || showFlowMap || showArrows || animating) && (…)}`.
+    expect(src).toMatch(/<Section title="参数">/);
+    expect(src).not.toMatch(/\(showReference \|\| showFlowMap \|\| showArrows \|\| animating\)/);
+
+    // Every row is present, and each one is dimmed by the flag that gates it.
+    const sect = src.match(/<Section title="参数">[\s\S]*?<\/Section>/)![0];
+    expect(sect).not.toMatch(/\{(showReference|showFlowMap|showArrows|animating) &&/);
+    for (const [label, flag] of
+      [['贴图', 'showReference'], ['叠加', 'showFlowMap'], ['密度', 'showArrows'],
+       ['速度', 'animating'], ['强度', 'animating']] as const) {
+      expect(sect, `${label} must always render`).toContain(`<Row label="${label}"`);
+      expect(sect, `${label} must be dimmed by ${flag}`).toContain(`off={!${flag}}`);
+    }
+    // Five rows in, five rows out — the section does not grow or shrink.
+    expect(sect.match(/<Row label=/g)).toHaveLength(5);
+  });
+
+  it('disables the slider too, so a dimmed row is actually inert', () => {
+    // Dimming alone is a lie about state: the row looks unavailable but still
+    // takes drags, and moving it would change a value you cannot see applied.
+    const sect = src.match(/<Section title="参数">[\s\S]*?<\/Section>/)![0];
+    expect(sect.match(/disabled=\{!\w+\}/g)).toHaveLength(5);
+    expect(src).toMatch(/function Range\(\{[\s\S]*?disabled \}/);
+    expect(src).toMatch(/disabled=\{disabled\}/);
+    // ...and the inert look has to exist, or `disabled` is a no-op here:
+    // `appearance: none` means the UA's own dimming never applies.
+    expect(rawStyles).toMatch(/input\[type=range\]\.rng:disabled \{/);
+    expect(rawStyles).toMatch(/\.row\.off \.row-label \{ color: var\(--txt-faint\); \}/);
+    expect(rawStyles).toMatch(/\.row\.off \.row-value \{[^}]*color: var\(--txt-faint\);/);
+  });
+
+  it('applies the same rule to the two other conditional rows', () => {
+    // 障碍层's 范围 appeared only once 绕开障碍物流动 was ticked, and 文档的
+    // 张角 only for 极坐标. Both pushed everything below them down.
+    expect(src).toMatch(/<Row label="范围" off=\{!activeLayer\.disturbance_enabled\}/);
+    expect(src).not.toMatch(/activeLayer\.disturbance_enabled && \(\s*\n\s*<Row label="范围"/);
+    expect(src).toMatch(/<Row label="张角" off=\{state\.projection !== 'polar'\}/);
+    expect(src).not.toMatch(/state\.projection === 'polar' && \(\s*\n\s*<Row label="张角"/);
+  });
+
+  it('dims the row, not the whole card', () => {
+    // A uniform `opacity` on `.row` would take the *value* down with it, and
+    // the value is the part worth keeping legible — it tells you what the
+    // setting will come back as.
+    const off = rawStyles.match(/\.row\.off[^\n]*/g) ?? [];
+    expect(off.length).toBeGreaterThan(0);
+    expect(off.join('\n')).not.toContain('opacity');
   });
 });
 
@@ -806,14 +871,15 @@ describe('Photoshop "Pro (Dark)" palette', () => {
   });
 
   it('has no decorative gradients or glow in the chrome', () => {
-    // Two gradients exist, and neither decorates a surface: the slider's
-    // filled track (a range input's track *is* its background, so a gradient
-    // is the only way to draw one) and the layer thumbnail's transparency
-    // checkerboard. Anything else appearing here is an "app store" gradient
-    // creeping back in.
+    // Three gradients exist, and none decorates a surface: the slider's filled
+    // track, its inert twin (a dimmed row still shows *where* the value is),
+    // and the layer thumbnail's transparency checkerboard. A range input's
+    // track *is* its background, so a gradient is the only way to draw one.
+    // Anything else appearing here is an "app store" gradient creeping back in.
     const owners = [...rawStyles.matchAll(/(?:^|\n)([^\n{}]*)\{[^}]*linear-gradient/g)]
       .map((m) => m[1].trim());
-    expect(owners.sort()).toEqual(['.layer-thumb', 'input[type=range].rng']);
+    expect(owners.sort()).toEqual([
+      '.layer-thumb', 'input[type=range].rng', 'input[type=range].rng:disabled']);
     expect(rawStyles).not.toMatch(/box-shadow: 0 1px 4px/);
   });
 });

@@ -756,12 +756,15 @@ export default function App() {
                   绕开障碍物流动
                 </label>
               </Row>
-              {activeLayer.disturbance_enabled && (
-                <Row label="范围" value={`${Math.round(activeLayer.disturbance * 100)}%`}>
-                  <Range min={0} max={1} step={0.05} value={activeLayer.disturbance}
-                    onChange={(v) => updateLayer(activeLayer.id, { disturbance: v })} />
-                </Row>
-              )}
+              {/* Same rule as 视图's 参数: dim, don't disappear. Ticking 绕开
+                  障碍物流动 used to grow the panel by a row and by that much
+                  push 边缘 and 混合 down under the pointer. */}
+              <Row label="范围" off={!activeLayer.disturbance_enabled}
+                value={`${Math.round(activeLayer.disturbance * 100)}%`}>
+                <Range min={0} max={1} step={0.05} value={activeLayer.disturbance}
+                  onChange={(v) => updateLayer(activeLayer.id, { disturbance: v })}
+                  disabled={!activeLayer.disturbance_enabled} />
+              </Row>
             </>
           )}
         </Section>
@@ -866,8 +869,7 @@ export default function App() {
 
     /* Everything that used to hang over the canvas. The toggles are plain
        checkboxes rather than icon buttons because there is no longer a
-       floating bar to make them cryptic — and each one only shows its own
-       parameter, so the panel stays short. */
+       floating bar to make them cryptic. */
     view: (
       <>
         <Section title="叠加">
@@ -883,40 +885,45 @@ export default function App() {
           </div>
         </Section>
 
-        {(showReference || showFlowMap || showArrows || animating) && (
-          <Section title="参数">
-            {showReference && (
-              <Row label="贴图" value={`${Math.round(referenceOpacity * 100)}%`}>
-                <Range min={0} max={1} value={referenceOpacity}
-                  onChange={setReferenceOpacity} />
-              </Row>
-            )}
-            {showFlowMap && (
-              <Row label="叠加" value={`${Math.round(flowMapOpacity * 100)}%`}>
-                <Range min={0} max={1} value={flowMapOpacity}
-                  onChange={setFlowMapOpacity} />
-              </Row>
-            )}
-            {showArrows && (
-              <Row label="密度" value={String(arrowDensity)}>
-                <Range min={16} max={128} step={4} value={arrowDensity}
-                  onChange={setArrowDensity} />
-              </Row>
-            )}
-            {animating && (
-              <>
-                <Row label="速度" value={speed.toFixed(2)}>
-                  <Range min={0} max={2} step={0.05} value={speed}
-                    onChange={setSpeed} />
-                </Row>
-                <Row label="强度" value={distortion.toFixed(2)}>
-                  <Range min={0} max={0.5} value={distortion}
-                    onChange={setDistortion} />
-                </Row>
-              </>
-            )}
-          </Section>
-        )}
+        {/*
+          Every row is always here. A row whose overlay is off is *disabled*,
+          never absent.
+
+          The previous version rendered 参数 only once one of the overlays was
+          on, and one row per *enabled* overlay. Ticking a box therefore shoved
+          the whole column below it down — by a row for the second tick, by an
+          entire section (header, rule and all) for the first. You click a
+          checkbox and the thing you were about to click has moved.
+
+          PS never does this: its panels have a fixed set of controls and grey
+          out the ones that do not apply. Constant height also has a second
+          benefit — you can see that 叠加 Flowmap has an opacity at all, which
+          is not something a row that only exists while it is on can tell you.
+        */}
+        <Section title="参数">
+          <Row label="贴图" off={!showReference}
+            value={`${Math.round(referenceOpacity * 100)}%`}>
+            <Range min={0} max={1} value={referenceOpacity}
+              onChange={setReferenceOpacity} disabled={!showReference} />
+          </Row>
+          <Row label="叠加" off={!showFlowMap}
+            value={`${Math.round(flowMapOpacity * 100)}%`}>
+            <Range min={0} max={1} value={flowMapOpacity}
+              onChange={setFlowMapOpacity} disabled={!showFlowMap} />
+          </Row>
+          <Row label="密度" off={!showArrows} value={String(arrowDensity)}>
+            <Range min={16} max={128} step={4} value={arrowDensity}
+              onChange={setArrowDensity} disabled={!showArrows} />
+          </Row>
+          <Row label="速度" off={!animating} value={speed.toFixed(2)}>
+            <Range min={0} max={2} step={0.05} value={speed}
+              onChange={setSpeed} disabled={!animating} />
+          </Row>
+          <Row label="强度" off={!animating} value={distortion.toFixed(2)}>
+            <Range min={0} max={0.5} value={distortion}
+              onChange={setDistortion} disabled={!animating} />
+          </Row>
+        </Section>
       </>
     ),
 
@@ -933,14 +940,18 @@ export default function App() {
               </button>
             ))}
           </div>
-          {state.projection === 'polar' && (
-            <Row label="张角" value={`${state.polar_angle | 0}°`}>
-              <Range min={45} max={180} step={1} value={state.polar_angle}
-                onChange={async (v) => {
-                  applyUpdate(await api.setProjection('polar', v));
-                }} />
-            </Row>
-          )}
+          {/* 张角 only means something for 极坐标, but it still lives here
+              permanently — switching projection used to shift 天空贴图 up and
+              down by a row. Dimmed, it also advertises that 极坐标 has an
+              extra parameter. */}
+          <Row label="张角" off={state.projection !== 'polar'}
+            value={`${state.polar_angle | 0}°`}>
+            <Range min={45} max={180} step={1} value={state.polar_angle}
+              disabled={state.projection !== 'polar'}
+              onChange={async (v) => {
+                applyUpdate(await api.setProjection('polar', v));
+              }} />
+          </Row>
         </Section>
 
         <Section title="天空贴图">
@@ -1305,10 +1316,18 @@ function Section({ title, children }: { title: string; children: React.ReactNode
  * a text input here would mean the global shortcut handler has to keep
  * swallowing keystrokes it currently only inspects — typing "B" into 角度 must
  * not switch to the brush. Arrow keys on the focused slider already do the job.
+ *
+ * `off` dims the row instead of unmounting it. Conditional controls are what
+ * make a panel *jump*: ticking one checkbox in 视图 used to insert a whole
+ * section plus a row, pushing everything below it down by ~60px, and the
+ * pointer that was about to land on the next control landed on nothing. PS
+ * keeps such controls in place and greys them out, so the panel's height is a
+ * function of the panel, not of the current state.
  */
-function Row({ label, value, children }: { label: string; value?: string; children?: React.ReactNode }) {
+function Row({ label, value, children, off }:
+  { label: string; value?: string; children?: React.ReactNode; off?: boolean }) {
   return (
-    <div className="row">
+    <div className={`row ${off ? 'off' : ''}`} aria-disabled={off ? true : undefined}>
       <span className="row-label">{label}</span>
       {children}
       {value !== undefined && <span className="row-value" title="拖动左侧滑块调节">{value}</span>}
@@ -1324,9 +1343,9 @@ function Row({ label, value, children }: { label: string; value?: string; childr
  * PS's filled track with no wrapper between the pointer and the control. That
  * matters: a wrapper with `overflow: hidden` would clip the thumb.
  */
-function Range({ value, min, max, step = 0.01, onChange, title }:
+function Range({ value, min, max, step = 0.01, onChange, title, disabled }:
   { value: number; min: number; max: number; step?: number;
-    onChange: (v: number) => void; title?: string }) {
+    onChange: (v: number) => void; title?: string; disabled?: boolean }) {
   const pct = max > min ? ((value - min) / (max - min)) * 100 : 0;
   return (
     <input
@@ -1334,6 +1353,7 @@ function Range({ value, min, max, step = 0.01, onChange, title }:
       type="range"
       min={min} max={max} step={step} value={value}
       title={title}
+      disabled={disabled}
       style={{ '--p': `${pct}%` } as React.CSSProperties}
       onChange={(e) => onChange(Number(e.target.value))}
     />
