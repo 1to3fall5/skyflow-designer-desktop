@@ -376,8 +376,10 @@ describe('Photoshop-style shell', () => {
 
   it('makes the right-hand panels collapsible', () => {
     expect(src).toMatch(/<aside className="panels">/);
-    expect(src).toMatch(/collapsed=\{!!collapsed\.layers\}/);
-    expect(src).toMatch(/onToggle=\{\(\) => togglePanel\('layers'\)\}/);
+    // Keyed off the dock id now: the column renders from `panelOrder`, so no
+    // panel can have a hardcoded `collapsed.layers`.
+    expect(src).toMatch(/collapsed=\{!!collapsed\[pid\]\}/);
+    expect(src).toMatch(/onToggle=\{\(\) => togglePanel\(pid\)\}/);
     // The header has to be a real button or it is unreachable by keyboard.
     expect(src).toMatch(/<button className="panel-head" onClick=\{onToggle\} aria-expanded=/);
     expect(src).toMatch(/\{!collapsed && <div className="panel-body">/);
@@ -421,7 +423,7 @@ describe('panels hold state, the menu holds actions', () => {
     // 投影 and 图片源 are both "what kind of document is this": set once.
     // They are panel *sections* rather than sub-headings now — PS divides a
     // panel with full-bleed rules, not with small caps.
-    expect(src).toMatch(/<Panel id="document" title="文档"/);
+    expect(src).toMatch(/const panelTitle: Record<PanelId, string> = \{[\s\S]*?document: '文档',/);
     expect(src).toMatch(/<Section title="投影">/);
     expect(src).toMatch(/<Section title="天空贴图">/);
     // ...and it starts folded, so 图层 is not a scroll away.
@@ -436,7 +438,7 @@ describe('panels hold state, the menu holds actions', () => {
   });
 
   it('moves the view toggles off the canvas and into a 视图 panel', () => {
-    expect(src).toMatch(/<Panel id="view" title="视图"/);
+    expect(src).toMatch(/const panelTitle: Record<PanelId, string> = \{[\s\S]*?view: '视图',/);
     // All four, as checkboxes — no floating bar to make icons legible.
     for (const what of ['showReference', 'showFlowMap', 'showArrows', 'animating']) {
       expect(src, `${what} should have a checkbox`).toMatch(
@@ -597,6 +599,66 @@ describe('panel contents, laid out the way Photoshop lays them out', () => {
   });
 });
 
+describe('the panel column is a dock, not a fixed stack', () => {
+  /**
+   * A fixed order is a fixed opinion about what you are about to do, and it
+   * is wrong whenever you are doing something else. Moving 导出 to the top
+   * while you iterate on exports is the whole point of PS's dock.
+   */
+
+  it('renders the panels from state, in dock order', () => {
+    expect(src).toMatch(/const \[panelOrder, setPanelOrder\] = useState<PanelId\[\]>\(\[\.\.\.PANEL_IDS\]\);/);
+    expect(src).toMatch(/panelOrder\.filter\(\(pid\) => panels\[pid\] !== null\)\.map\(\(pid\) => \(/);
+    // 属性 describes the selected layer, so with nothing selected there is no
+    // panel — not an empty one.
+    expect(src).toMatch(/props: activeLayer \? \(/);
+    expect(src).toMatch(/\) : null,/);
+  });
+
+  it('makes the title bar the drag handle', () => {
+    // On the header, not on the section wrapper: the wrapper would turn the
+    // whole panel body — sliders included — into a drag source.
+    expect(src).toMatch(/const dockProps = \(id: PanelId\) => \(\{/);
+    expect(src).toMatch(/<button className="panel-head" onClick=\{onToggle\} aria-expanded=\{!collapsed\}[\s\S]*?\{\.\.\.dock\}/);
+    expect(src).toMatch(/dock=\{dockProps\(pid\)\}/);
+  });
+
+  it('does not let the two drag sources in the same column collide', () => {
+    // The layer list already owns `text/plain`, and `getData` is unreadable
+    // during `dragover` — `types` is all a handler gets. Distinct types are
+    // the only way one list can ignore the other's drag.
+    expect(src).toMatch(/const DOCK_MIME = 'application\/x-sf-panel';/);
+    expect(src).toMatch(/setData\(DOCK_MIME, id\)/);
+    expect(src).toMatch(/if \(!e\.dataTransfer\.types\.includes\(DOCK_MIME\)\) return;/);
+    expect(src).toMatch(/if \(!e\.dataTransfer\.types\.includes\('text\/plain'\)\) return;/);
+    // ...and a panel payload must never be read as a layer index.
+    expect(src).toMatch(/if \(!\/\^\\d\+\$\/\.test\(raw\)\) return;/);
+  });
+
+  it('reorders by moving 到 the slot it was dropped on', () => {
+    expect(src).toMatch(/const reorderPanel = \(from: string, to: string\) => \{/);
+    expect(src).toMatch(/if \(from === to\) return;/);
+    // Splice at the target's index, so dropping on a panel lands above it —
+    // which is what `drop-above` advertises.
+    expect(src).toMatch(/next\.splice\(at, 0, from as PanelId\);/);
+  });
+
+  it('shows where the panel will land', () => {
+    // Without the rule a reorder is invisible until it is already done.
+    expect(src).toMatch(/panelOver === pid && panelDrag && panelDrag !== pid \? 'drop-above' : '',/);
+    expect(rawStyles).toMatch(/\.panel\.drop-above \{ box-shadow: 0 -2px 0 var\(--accent\); \}/);
+    expect(rawStyles).toMatch(/\.panel\.dragging \{ opacity: \.5; \}/);
+    // ...and the title bar says it is draggable, because nothing else does.
+    expect(src).toMatch(/title=\{`\$\{title\} · 点击折叠，拖动标题栏可重排`\}/);
+  });
+
+  it('keeps the gap between cards tight', () => {
+    const body = rawStyles.match(/\.panels \{[^}]*\}/)![0];
+    expect(body).toMatch(/padding: 4px;/);
+    expect(body).toMatch(/gap: 4px;/);
+  });
+});
+
 describe('menu bar merged into the title bar', () => {
   const rawMenu = readFileSync(new URL('./menu.ts', import.meta.url), 'utf8');
   const rawBar = readFileSync(new URL('./AppBar.tsx', import.meta.url), 'utf8');
@@ -649,9 +711,13 @@ describe('menu bar merged into the title bar', () => {
   it('puts 属性 above 图层, the way PS does', () => {
     // Contextual to the selected layer, so it belongs at the top of the column
     // rather than under the list it describes.
+    //
+    // This is the *default* order only — the column is a dock now, so the
+    // order is state and can be dragged into anything. See `panelOrder`.
     expect(src).toMatch(/PANEL_IDS = \['props', 'layers',/);
-    const propsAt = src.indexOf('<Panel id="props"');
-    const layersAt = src.indexOf('<Panel id="layers"');
+    expect(src).toMatch(/useState<PanelId\[\]>\(\[\.\.\.PANEL_IDS\]\)/);
+    const propsAt = src.indexOf('    props: activeLayer ? (');
+    const layersAt = src.indexOf('    layers: (');
     expect(propsAt).toBeGreaterThan(0);
     expect(propsAt).toBeLessThan(layersAt);
   });

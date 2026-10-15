@@ -318,13 +318,23 @@ button:disabled { opacity: .35; cursor: default; }
   background: var(--dock);
   border-left: 1px solid var(--separator);
   overflow-y: auto;
-  padding: 6px;
+  /* Tight: 4px of #1e1e1e between two #323232 cards is already a clear seam,
+     and at 272px wide the column is mostly panel, mostly not gutter. */
+  padding: 4px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 .panels::-webkit-scrollbar { width: 8px; }
 .panels::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+
+/* ---------- dock: drag a panel by its title bar to reorder ---------- */
+/* The panel being dragged. A ghost at half opacity is the whole feedback —
+   PS dims the source too, so it stays obvious which one you picked up. */
+.panel.dragging { opacity: .5; }
+/* Where it will land: a blue rule on the top edge of the panel it is over,
+   because dropping on a panel inserts *above* it. */
+.panel.drop-above { box-shadow: 0 -2px 0 var(--accent); }
 
 .panel {
   display: flex; flex-direction: column;

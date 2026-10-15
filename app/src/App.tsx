@@ -39,8 +39,23 @@ const TOOLS: Array<{ tool: Tool; icon: string; label: string; key: string }> = [
  * three are one-time things, so they are now either folded into 文档 or in the
  * 文件 menu.
  */
+/**
+ * Default dock order. It is only a *starting* point: the column is a dock, so
+ * the order is state and you drag it into whatever arrangement you are working
+ * with — see `panelOrder`.
+ */
 const PANEL_IDS = ['props', 'layers', 'view', 'document', 'export'] as const;
 type PanelId = typeof PANEL_IDS[number];
+
+/**
+ * Drag payload type for reordering the dock.
+ *
+ * Deliberately not `text/plain`: the layer list is another drag source in the
+ * same column and already owns that type, and `getData` is unreadable during
+ * `dragover` — `types` is all a handler gets. Distinct types let each list
+ * ignore the other's drag.
+ */
+const DOCK_MIME = 'application/x-sf-panel';
 
 /**
  * Panels that start folded. Document setup and export are set once and then
@@ -121,6 +136,20 @@ export default function App() {
   // ---- shell layout (Photoshop-style) ----
   /** Which right-hand panels are folded. See `START_COLLAPSED`. */
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(START_COLLAPSED);
+  /**
+   * Dock order of the right-hand panels.
+   *
+   * Photoshop's panel column is a dock: you drag a panel by its title bar and
+   * it lands where you dropped it. A fixed order is a fixed opinion about what
+   * you are about to do, and it is wrong whenever you are doing something else
+   * — moving 导出 to the top while you are iterating on exports is the whole
+   * point.
+   */
+  const [panelOrder, setPanelOrder] = useState<PanelId[]>([...PANEL_IDS]);
+  /** Panel being dragged, and the one it would land on. Both for feedback
+   *  only: without the accent line a reorder is invisible until it is done. */
+  const [panelDrag, setPanelDrag] = useState<string | null>(null);
+  const [panelOver, setPanelOver] = useState<string | null>(null);
   /** Tab: hide the toolbox, the panels and the options bar. PS calls this
    *  "collapse all panels" and it is the single most useful key when painting. */
   const [shellHidden, setShellHidden] = useState(false);
@@ -128,6 +157,20 @@ export default function App() {
   const [splitRatio, setSplitRatio] = useState(0.5);
   const [zoom2d, setZoom2d] = useState(1);
   const togglePanel = (id: PanelId) => setCollapsed((c) => ({ ...c, [id]: !c[id] }));
+
+  /** Move `from` to sit where `to` currently sits. Dropping on your own
+   *  panel is a no-op, and so is dropping on the panel you came from. */
+  const reorderPanel = (from: string, to: string) => {
+    if (from === to) return;
+    setPanelOrder((o) => {
+      const next = o.filter((id) => id !== from);
+      const at = next.indexOf(to as PanelId);
+      // `to` was `from`'s own slot, so `indexOf` can come back -1.
+      if (at < 0) return o;
+      next.splice(at, 0, from as PanelId);
+      return next;
+    });
+  };
 
   const paintRef = useRef<PaintViewHandle>(null);
   const previewRef = useRef<Preview3DHandle>(null);
@@ -548,6 +591,320 @@ export default function App() {
     }
   };
 
+  // -- dock -----------------------------------------------------------------
+  /**
+   * Drag-to-reorder props for a panel's title bar.
+   *
+   * A custom MIME type, not `text/plain`: the layer rows below already use
+   * `text/plain`, and `getData` is deliberately unreadable during `dragover` —
+   * `types` is all a handler gets. Distinct types let each list ignore the
+   * other's drag instead of lighting up two drop targets at once.
+   */
+  const dockProps = (id: PanelId) => ({
+    draggable: true,
+    onDragStart: (e: React.DragEvent) => {
+      e.dataTransfer.setData(DOCK_MIME, id);
+      e.dataTransfer.effectAllowed = 'move';
+      setPanelDrag(id);
+    },
+    onDragEnd: () => { setPanelDrag(null); setPanelOver(null); },
+    onDragOver: (e: React.DragEvent) => {
+      if (!e.dataTransfer.types.includes(DOCK_MIME)) return;
+      e.preventDefault();
+      setPanelOver(id);
+    },
+    onDragLeave: () => setPanelOver((v) => (v === id ? null : v)),
+    onDrop: (e: React.DragEvent) => {
+      const from = e.dataTransfer.getData(DOCK_MIME);
+      e.preventDefault();
+      setPanelDrag(null);
+      setPanelOver(null);
+      if (from) reorderPanel(from, id);
+    },
+  });
+
+  /**
+   * Panel bodies, keyed so the dock can render them in `panelOrder` rather
+   * than in whatever order they happen to be written in.
+   *
+   * `props` is null while there is no active layer: it describes the selected
+   * layer, so with nothing selected there is nothing to show.
+   */
+  const panels: Record<PanelId, React.ReactNode> = {
+    props: activeLayer ? (
+      <>
+        <Section title={PARAM_SECT[activeLayer.kind]}>
+          {activeLayer.kind === 'paint' && (
+            <p className="note">
+              这一层的像素是笔迹本身。大小、强度、流量、硬度都在顶部选项栏里，
+              画到下层遮罩上就会在遮罩处盖住下面的图层。
+            </p>
+          )}
+          {activeLayer.kind === 'wind' && (
+            <>
+              <Row label="方向" value={`${activeLayer.direction | 0}°`}>
+                <Range min={0} max={360} step={1} value={activeLayer.direction}
+                  onChange={(v) => updateLayer(activeLayer.id, { direction: v })} />
+              </Row>
+              <Row label="强度" value={`${Math.round(activeLayer.strength * 100)}%`}>
+                <Range min={0} max={1} value={activeLayer.strength}
+                  onChange={(v) => updateLayer(activeLayer.id, { strength: v })} />
+              </Row>
+            </>
+          )}
+          {activeLayer.kind === 'obstacle' && (
+            <>
+              <Row label="扰动">
+                <label className="check">
+                  <input type="checkbox" checked={activeLayer.disturbance_enabled}
+                    onChange={(e) => updateLayer(activeLayer.id, { disturbance_enabled: e.target.checked })} />
+                  绕开障碍物流动
+                </label>
+              </Row>
+              {activeLayer.disturbance_enabled && (
+                <Row label="范围" value={`${Math.round(activeLayer.disturbance * 100)}%`}>
+                  <Range min={0} max={1} step={0.05} value={activeLayer.disturbance}
+                    onChange={(v) => updateLayer(activeLayer.id, { disturbance: v })} />
+                </Row>
+              )}
+            </>
+          )}
+        </Section>
+
+        <Section title="边缘">
+          <Row label="模糊" value={String(activeLayer.blur | 0)}>
+            <Range min={0} max={64} step={1} value={activeLayer.blur}
+              onChange={(v) => updateLayer(activeLayer.id, { blur: v })} />
+          </Row>
+        </Section>
+
+        <Section title="混合">
+          <Row label="不透明度" value={`${Math.round(activeLayer.opacity * 100)}%`}>
+            <Range min={0} max={1} value={activeLayer.opacity}
+              onChange={(v) => updateLayer(activeLayer.id, { opacity: v })} />
+          </Row>
+        </Section>
+      </>
+    ) : null,
+
+    layers: (
+      <>
+        {/* An icon strip, the way PS's layer panel is built: create, reorder
+            and delete are glyph buttons in one row, so the width goes to the
+            thumbnails and the names instead of to six two-character labels.
+            Every one carries a `title`, because a glyph with no label is a
+            guess. */}
+        <div className="layer-bar bleed">
+          <IconBtn icon="brush" title="新建流向图层" onClick={() => structural(api.addLayer('paint'))} />
+          <IconBtn icon="wind" title="新建风向图层" onClick={() => structural(api.addLayer('wind'))} />
+          <IconBtn icon="box" title="新建障碍图层" onClick={() => structural(api.addLayer('obstacle'))} />
+          <span className="bar-sep" />
+          {/* Keyboard- and pointer-reachable reordering. Drag and drop works
+              too, but it is undiscoverable on its own. */}
+          <IconBtn icon="up" title="上移一层（越靠上越晚合成，即覆盖下方图层）"
+            disabled={!canMoveUp} onClick={() => moveActive(-1)} />
+          <IconBtn icon="down" title="下移一层（越靠下越早合成，即被上方图层覆盖）"
+            disabled={!canMoveDown} onClick={() => moveActive(1)} />
+          <span className="bar-sep" />
+          <IconBtn icon="trash" danger title="删除图层"
+            disabled={state.layers.length <= 1}
+            onClick={() => activeLayer && structural(api.removeLayer(activeLayer.id))} />
+        </div>
+        <div className="layer-list bleed">
+          {layers.map((l, i) => {
+            const meta = KIND_META[l.kind];
+            const active = l.id === state.active;
+            return (
+              <div
+                key={l.id}
+                draggable
+                onDragStart={(e) => {
+                  e.dataTransfer.setData('text/plain', String(i));
+                  e.dataTransfer.effectAllowed = 'move';
+                }}
+                onDragOver={(e) => {
+                  // Ignore a panel drag: the two lists share a column and a
+                  // row lighting up under a panel is pure noise.
+                  if (!e.dataTransfer.types.includes('text/plain')) return;
+                  e.preventDefault();
+                  setDragOver(i);
+                }}
+                onDragLeave={() => setDragOver((d) => (d === i ? null : d))}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setDragOver(null);
+                  const raw = e.dataTransfer.getData('text/plain');
+                  if (!/^\d+$/.test(raw)) return;
+                  const from = Number(raw);
+                  if (from !== i) structural(api.reorder(from, i));
+                }}
+                onDragEnd={() => setDragOver(null)}
+                className={`layer ${active ? 'active' : ''} ${dragOver === i ? 'drop-target' : ''}`}
+                title={`${meta.label} · ${l.name}`}
+                onClick={async () => { setState(await api.setActive(l.id)); }}
+              >
+                {/* The eye sits in its own fixed column so every eye in the
+                    list lines up, which is the whole reason the column reads
+                    as a column. */}
+                <button className="eye" title={l.visible ? '隐藏图层' : '显示图层'}
+                  onClick={(e) => { e.stopPropagation(); updateLayer(l.id, { visible: !l.visible }); }}>
+                  <ToolIcon name={l.visible ? 'eye' : 'eye-off'} size={14} />
+                </button>
+
+                {/* Thumbnail of the layer's own pixels, on a checkerboard when
+                    it is empty — Photoshop's language for "nothing here yet".
+                    The plate takes the kind colour so the row still says what
+                    it is once the name is elided. */}
+                <span className="layer-thumb" style={{ borderColor: `${meta.color}66` }}>
+                  {thumbs[l.id] && <img src={thumbs[l.id]} alt="" />}
+                </span>
+
+                <span className="ellipsis name">{l.name}</span>
+
+                {l.kind !== 'paint' && active && (
+                  // Not a toggle: painting an adjustment layer always edits its
+                  // mask. A "参数/遮罩" switch here could silently eat brush
+                  // strokes, which is exactly the bug it caused.
+                  <span className="chip hint" title="绘制即编辑遮罩">遮罩</span>
+                )}
+
+                {/* Reordering handle. The whole row is draggable, so this is an
+                    affordance rather than the only target — it fades in on
+                    hover so it does not read as a column of its own. */}
+                <span className="grip" title="拖动调整图层顺序">⋮⋮</span>
+              </div>
+            );
+          })}
+        </div>
+      </>
+    ),
+
+    /* Everything that used to hang over the canvas. The toggles are plain
+       checkboxes rather than icon buttons because there is no longer a
+       floating bar to make them cryptic — and each one only shows its own
+       parameter, so the panel stays short. */
+    view: (
+      <>
+        <Section title="叠加">
+          <div className="checks">
+            <label><input type="checkbox" checked={showReference}
+              onChange={(e) => setShowReference(e.target.checked)} /> 天空贴图</label>
+            <label><input type="checkbox" checked={showFlowMap}
+              onChange={(e) => setShowFlowMap(e.target.checked)} /> 叠加 Flowmap</label>
+            <label><input type="checkbox" checked={showArrows}
+              onChange={(e) => setShowArrows(e.target.checked)} /> 流向箭头</label>
+            <label><input type="checkbox" checked={animating}
+              onChange={(e) => setAnimating(e.target.checked)} /> 播放动画</label>
+          </div>
+        </Section>
+
+        {(showReference || showFlowMap || showArrows || animating) && (
+          <Section title="参数">
+            {showReference && (
+              <Row label="贴图" value={`${Math.round(referenceOpacity * 100)}%`}>
+                <Range min={0} max={1} value={referenceOpacity}
+                  onChange={setReferenceOpacity} />
+              </Row>
+            )}
+            {showFlowMap && (
+              <Row label="叠加" value={`${Math.round(flowMapOpacity * 100)}%`}>
+                <Range min={0} max={1} value={flowMapOpacity}
+                  onChange={setFlowMapOpacity} />
+              </Row>
+            )}
+            {showArrows && (
+              <Row label="密度" value={String(arrowDensity)}>
+                <Range min={16} max={128} step={4} value={arrowDensity}
+                  onChange={setArrowDensity} />
+              </Row>
+            )}
+            {animating && (
+              <>
+                <Row label="速度" value={speed.toFixed(2)}>
+                  <Range min={0} max={2} step={0.05} value={speed}
+                    onChange={setSpeed} />
+                </Row>
+                <Row label="强度" value={distortion.toFixed(2)}>
+                  <Range min={0} max={0.5} value={distortion}
+                    onChange={setDistortion} />
+                </Row>
+              </>
+            )}
+          </Section>
+        )}
+      </>
+    ),
+
+    /* 投影 and 图片源 are both "what kind of document is this": set once, then
+       never touched again while painting. One folded panel instead of two. */
+    document: (
+      <>
+        <Section title="投影">
+          <div className="seg">
+            {([['equirectangular', '球面'], ['polar', '极坐标'], ['planar', '平面']] as const).map(([k, label]) => (
+              <button key={k} className={state.projection === k ? 'on' : ''}
+                onClick={async () => applyUpdate(await api.setProjection(k, state.polar_angle))}>
+                {label}
+              </button>
+            ))}
+          </div>
+          {state.projection === 'polar' && (
+            <Row label="张角" value={`${state.polar_angle | 0}°`}>
+              <Range min={45} max={180} step={1} value={state.polar_angle}
+                onChange={async (v) => {
+                  applyUpdate(await api.setProjection('polar', v));
+                }} />
+            </Row>
+          )}
+        </Section>
+
+        <Section title="天空贴图">
+          <button className="dropzone" onClick={() => importImage()}>
+            <span>点击选择天空贴图</span>
+            <small>等距柱状投影 2:1 / 极坐标 / 平面</small>
+          </button>
+          {state.reference_path && (
+            <div className="thumb-row">
+              {refSrc && <img src={refSrc} alt="" className="thumb" />}
+              <div className="thumb-meta">
+                <div className="ellipsis">{state.reference_path.split(/[\\/]/).pop()}</div>
+                <button className="link" onClick={async () => {
+                  setState(await api.clearReference());
+                  setRefSrc(null);
+                }}>移除</button>
+              </div>
+            </div>
+          )}
+        </Section>
+      </>
+    ),
+
+    export: (
+      <>
+        <Section title="输出">
+          <Row label="分辨率">
+            <select value={exportRes} onChange={(e) => setExportRes(Number(e.target.value))}>
+              {RESOLUTIONS.map((r) => <option key={r} value={r}>{r}²</option>)}
+            </select>
+          </Row>
+          <div className="checks">
+            <label><input type="checkbox" checked={invertX} onChange={(e) => setInvertX(e.target.checked)} /> 反转 R</label>
+            <label><input type="checkbox" checked={invertY} onChange={(e) => setInvertY(e.target.checked)} /> 反转 G</label>
+          </div>
+        </Section>
+        <button className="primary wide" onClick={doExport}>导出 Flowmap</button>
+      </>
+    ),
+  };
+
+  /** Titles. 属性's is contextual, so it cannot be a constant. */
+  const panelTitle: Record<PanelId, string> = {
+    props: activeLayer ? `${KIND_META[activeLayer.kind].label}属性` : '属性',
+    layers: '图层',
+    view: '视图',
+    document: '文档',
+    export: '导出',
+  };
 
   return (
     <div className="app">
@@ -734,261 +1091,26 @@ export default function App() {
 
         {!shellHidden && (
           <aside className="panels">
-            {activeLayer && (
-              <Panel id="props" title={`${KIND_META[activeLayer.kind].label}属性`}
-                collapsed={!!collapsed.props} onToggle={() => togglePanel('props')}>
-                <Section title={PARAM_SECT[activeLayer.kind]}>
-                  {activeLayer.kind === 'paint' && (
-                    <p className="note">
-                      这一层的像素是笔迹本身。大小、强度、流量、硬度都在顶部选项栏里，
-                      画到下层遮罩上就会在遮罩处盖住下面的图层。
-                    </p>
-                  )}
-                  {activeLayer.kind === 'wind' && (
-                    <>
-                      <Row label="方向" value={`${activeLayer.direction | 0}°`}>
-                        <Range min={0} max={360} step={1} value={activeLayer.direction}
-                          onChange={(v) => updateLayer(activeLayer.id, { direction: v })} />
-                      </Row>
-                      <Row label="强度" value={`${Math.round(activeLayer.strength * 100)}%`}>
-                        <Range min={0} max={1} value={activeLayer.strength}
-                          onChange={(v) => updateLayer(activeLayer.id, { strength: v })} />
-                      </Row>
-                    </>
-                  )}
-                  {activeLayer.kind === 'obstacle' && (
-                    <>
-                      <Row label="扰动">
-                        <label className="check">
-                          <input type="checkbox" checked={activeLayer.disturbance_enabled}
-                            onChange={(e) => updateLayer(activeLayer.id, { disturbance_enabled: e.target.checked })} />
-                          绕开障碍物流动
-                        </label>
-                      </Row>
-                      {activeLayer.disturbance_enabled && (
-                        <Row label="范围" value={`${Math.round(activeLayer.disturbance * 100)}%`}>
-                          <Range min={0} max={1} step={0.05} value={activeLayer.disturbance}
-                            onChange={(v) => updateLayer(activeLayer.id, { disturbance: v })} />
-                        </Row>
-                      )}
-                    </>
-                  )}
-                </Section>
-
-                <Section title="边缘">
-                  <Row label="模糊" value={String(activeLayer.blur | 0)}>
-                    <Range min={0} max={64} step={1} value={activeLayer.blur}
-                      onChange={(v) => updateLayer(activeLayer.id, { blur: v })} />
-                  </Row>
-                </Section>
-
-                <Section title="混合">
-                  <Row label="不透明度" value={`${Math.round(activeLayer.opacity * 100)}%`}>
-                    <Range min={0} max={1} value={activeLayer.opacity}
-                      onChange={(v) => updateLayer(activeLayer.id, { opacity: v })} />
-                  </Row>
-                </Section>
+            {panelOrder.filter((pid) => panels[pid] !== null).map((pid) => (
+              <Panel
+                key={pid}
+                id={pid}
+                title={panelTitle[pid]}
+                grow={pid === 'layers'}
+                collapsed={!!collapsed[pid]}
+                onToggle={() => togglePanel(pid)}
+                dock={dockProps(pid)}
+                cls={[
+                  panelDrag === pid ? 'dragging' : '',
+                  // PS marks the drop slot with a blue rule on the edge the
+                  // panel will land against. Without it a reorder is invisible
+                  // until it is already done.
+                  panelOver === pid && panelDrag && panelDrag !== pid ? 'drop-above' : '',
+                ].filter(Boolean).join(' ')}
+              >
+                {panels[pid]}
               </Panel>
-            )}
-
-            <Panel id="layers" title="图层" grow
-              collapsed={!!collapsed.layers} onToggle={() => togglePanel('layers')}>
-              {/* An icon strip, the way PS's layer panel is built: create,
-                  reorder and delete are glyph buttons in one row, so the
-                  width goes to the thumbnails and the names instead of to
-                  six two-character labels. Every one carries a `title`,
-                  because a glyph with no label is a guess. */}
-              <div className="layer-bar bleed">
-                <IconBtn icon="brush" title="新建流向图层" onClick={() => structural(api.addLayer('paint'))} />
-                <IconBtn icon="wind" title="新建风向图层" onClick={() => structural(api.addLayer('wind'))} />
-                <IconBtn icon="box" title="新建障碍图层" onClick={() => structural(api.addLayer('obstacle'))} />
-                <span className="bar-sep" />
-                {/* Keyboard- and pointer-reachable reordering. Drag and drop
-                    works too, but it is undiscoverable on its own. */}
-                <IconBtn icon="up" title="上移一层（越靠上越晚合成，即覆盖下方图层）"
-                  disabled={!canMoveUp} onClick={() => moveActive(-1)} />
-                <IconBtn icon="down" title="下移一层（越靠下越早合成，即被上方图层覆盖）"
-                  disabled={!canMoveDown} onClick={() => moveActive(1)} />
-                <span className="bar-sep" />
-                <IconBtn icon="trash" danger title="删除图层"
-                  disabled={state.layers.length <= 1}
-                  onClick={() => activeLayer && structural(api.removeLayer(activeLayer.id))} />
-              </div>
-              <div className="layer-list bleed">
-                {layers.map((l, i) => {
-                  const meta = KIND_META[l.kind];
-                  const active = l.id === state.active;
-                  return (
-                    <div
-                      key={l.id}
-                      draggable
-                      onDragStart={(e) => {
-                        e.dataTransfer.setData('text/plain', String(i));
-                        e.dataTransfer.effectAllowed = 'move';
-                      }}
-                      onDragOver={(e) => { e.preventDefault(); setDragOver(i); }}
-                      onDragLeave={() => setDragOver((d) => (d === i ? null : d))}
-                      onDrop={(e) => {
-                        e.preventDefault();
-                        setDragOver(null);
-                        const from = Number(e.dataTransfer.getData('text/plain'));
-                        if (from !== i) structural(api.reorder(from, i));
-                      }}
-                      onDragEnd={() => setDragOver(null)}
-                      className={`layer ${active ? 'active' : ''} ${dragOver === i ? 'drop-target' : ''}`}
-                      title={`${meta.label} · ${l.name}`}
-                      onClick={async () => { setState(await api.setActive(l.id)); }}
-                    >
-                      {/* The eye sits in its own fixed column so every eye in
-                          the list lines up, which is the whole reason the
-                          column reads as a column. */}
-                      <button className="eye" title={l.visible ? '隐藏图层' : '显示图层'}
-                        onClick={(e) => { e.stopPropagation(); updateLayer(l.id, { visible: !l.visible }); }}>
-                        <ToolIcon name={l.visible ? 'eye' : 'eye-off'} size={14} />
-                      </button>
-
-                      {/* Thumbnail of the layer's own pixels, on a checkerboard
-                          when it is empty — Photoshop's language for "nothing
-                          here yet". The plate takes the kind colour so the row
-                          still says what it is once the name is elided. */}
-                      <span className="layer-thumb" style={{ borderColor: `${meta.color}66` }}>
-                        {thumbs[l.id] && <img src={thumbs[l.id]} alt="" />}
-                      </span>
-
-                      <span className="ellipsis name">{l.name}</span>
-
-                      {l.kind !== 'paint' && active && (
-                        // Not a toggle: painting an adjustment layer always edits
-                        // its mask. A "参数/遮罩" switch here could silently eat
-                        // brush strokes, which is exactly the bug it caused.
-                        <span className="chip hint" title="绘制即编辑遮罩">遮罩</span>
-                      )}
-
-                      {/* Reordering handle. The whole row is draggable, so this
-                          is an affordance rather than the only target — it
-                          fades in on hover so it does not read as a column of
-                          its own. */}
-                      <span className="grip" title="拖动调整图层顺序">⋮⋮</span>
-                    </div>
-                  );
-                })}
-              </div>
-            </Panel>
-
-            {/* Everything that used to hang over the canvas. The toggles are
-                plain checkboxes rather than icon buttons because there is no
-                longer a floating bar to make them cryptic — and each one only
-                shows its own parameter, so the panel stays short. */}
-            <Panel id="view" title="视图"
-              collapsed={!!collapsed.view} onToggle={() => togglePanel('view')}>
-              <Section title="叠加">
-                <div className="checks">
-                  <label><input type="checkbox" checked={showReference}
-                    onChange={(e) => setShowReference(e.target.checked)} /> 天空贴图</label>
-                  <label><input type="checkbox" checked={showFlowMap}
-                    onChange={(e) => setShowFlowMap(e.target.checked)} /> 叠加 Flowmap</label>
-                  <label><input type="checkbox" checked={showArrows}
-                    onChange={(e) => setShowArrows(e.target.checked)} /> 流向箭头</label>
-                  <label><input type="checkbox" checked={animating}
-                    onChange={(e) => setAnimating(e.target.checked)} /> 播放动画</label>
-                </div>
-              </Section>
-
-              {(showReference || showFlowMap || showArrows || animating) && (
-                <Section title="参数">
-                  {showReference && (
-                    <Row label="贴图" value={`${Math.round(referenceOpacity * 100)}%`}>
-                      <Range min={0} max={1} value={referenceOpacity}
-                        onChange={setReferenceOpacity} />
-                    </Row>
-                  )}
-                  {showFlowMap && (
-                    <Row label="叠加" value={`${Math.round(flowMapOpacity * 100)}%`}>
-                      <Range min={0} max={1} value={flowMapOpacity}
-                        onChange={setFlowMapOpacity} />
-                    </Row>
-                  )}
-                  {showArrows && (
-                    <Row label="密度" value={String(arrowDensity)}>
-                      <Range min={16} max={128} step={4} value={arrowDensity}
-                        onChange={setArrowDensity} />
-                    </Row>
-                  )}
-                  {animating && (
-                    <>
-                      <Row label="速度" value={speed.toFixed(2)}>
-                        <Range min={0} max={2} step={0.05} value={speed}
-                          onChange={setSpeed} />
-                      </Row>
-                      <Row label="强度" value={distortion.toFixed(2)}>
-                        <Range min={0} max={0.5} value={distortion}
-                          onChange={setDistortion} />
-                      </Row>
-                    </>
-                  )}
-                </Section>
-              )}
-            </Panel>
-
-            {/* 投影 and 图片源 are both "what kind of document is this": set
-                once, then never touched again while painting. One folded panel
-                instead of two open ones. */}
-            <Panel id="document" title="文档"
-              collapsed={!!collapsed.document} onToggle={() => togglePanel('document')}>
-              <Section title="投影">
-                <div className="seg">
-                  {([['equirectangular', '球面'], ['polar', '极坐标'], ['planar', '平面']] as const).map(([k, label]) => (
-                    <button key={k} className={state.projection === k ? 'on' : ''}
-                      onClick={async () => applyUpdate(await api.setProjection(k, state.polar_angle))}>
-                      {label}
-                    </button>
-                  ))}
-                </div>
-                {state.projection === 'polar' && (
-                  <Row label="张角" value={`${state.polar_angle | 0}°`}>
-                    <Range min={45} max={180} step={1} value={state.polar_angle}
-                      onChange={async (v) => {
-                        applyUpdate(await api.setProjection('polar', v));
-                      }} />
-                  </Row>
-                )}
-              </Section>
-
-              <Section title="天空贴图">
-                <button className="dropzone" onClick={() => importImage()}>
-                  <span>点击选择天空贴图</span>
-                  <small>等距柱状投影 2:1 / 极坐标 / 平面</small>
-                </button>
-                {state.reference_path && (
-                  <div className="thumb-row">
-                    {refSrc && <img src={refSrc} alt="" className="thumb" />}
-                    <div className="thumb-meta">
-                      <div className="ellipsis">{state.reference_path.split(/[\\/]/).pop()}</div>
-                      <button className="link" onClick={async () => {
-                        setState(await api.clearReference());
-                        setRefSrc(null);
-                      }}>移除</button>
-                    </div>
-                  </div>
-                )}
-              </Section>
-            </Panel>
-
-            <Panel id="export" title="导出"
-              collapsed={!!collapsed.export} onToggle={() => togglePanel('export')}>
-              <Section title="输出">
-                <Row label="分辨率">
-                  <select value={exportRes} onChange={(e) => setExportRes(Number(e.target.value))}>
-                    {RESOLUTIONS.map((r) => <option key={r} value={r}>{r}²</option>)}
-                  </select>
-                </Row>
-                <div className="checks">
-                  <label><input type="checkbox" checked={invertX} onChange={(e) => setInvertX(e.target.checked)} /> 反转 R</label>
-                  <label><input type="checkbox" checked={invertY} onChange={(e) => setInvertY(e.target.checked)} /> 反转 G</label>
-                </div>
-              </Section>
-              <button className="primary wide" onClick={doExport}>导出 Flowmap</button>
-            </Panel>
+            ))}
             {/* 最近打开 is gone from here on purpose: it is 文件 > 打开最近 now,
                 which is where every program with a File menu puts it. A list of
                 file paths is not document state and does not belong in the
@@ -1028,20 +1150,24 @@ export default function App() {
 /**
  * A right-hand panel. Photoshop's panels fold to a title bar only, which is
  * what makes the panel column usable: you keep the layers open and shut
- * everything you are not touching.
+ * everything you are not touching. The same title bar is also the drag handle
+ * for reordering the dock, which is why `dock` lands on it and not on the
+ * section wrapper — the wrapper would make the whole panel body a drag source,
+ * including its sliders.
  *
  * The header is a real button so it is keyboard reachable; `data-panel` is
  * there for the tests to latch onto.
  */
-function Panel({ id, title, children, collapsed, onToggle, grow }:
+function Panel({ id, title, children, collapsed, onToggle, grow, cls, dock }:
   { id: string; title: string; children: React.ReactNode; collapsed: boolean;
-    onToggle: () => void; grow?: boolean }) {
+    onToggle: () => void; grow?: boolean; cls?: string; dock?: object }) {
   return (
     <section
-      className={`panel ${collapsed ? 'collapsed' : ''} ${grow ? 'grow' : ''}`}
+      className={`panel ${collapsed ? 'collapsed' : ''} ${grow ? 'grow' : ''} ${cls ?? ''}`}
       data-panel={id}
     >
-      <button className="panel-head" onClick={onToggle} aria-expanded={!collapsed} title={title}>
+      <button className="panel-head" onClick={onToggle} aria-expanded={!collapsed}
+        title={`${title} · 点击折叠，拖动标题栏可重排`} {...dock}>
         <span className="chev"><ToolIcon name={collapsed ? 'right' : 'down'} size={12} /></span>
         <span className="ellipsis">{title}</span>
       </button>
