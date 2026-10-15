@@ -1,0 +1,1210 @@
+//! Integration tests for the pixel engine.
+//! Run with: `cargo test -p skyflow-designer`
+
+use skyflow_lib::engine::buf::Buf;
+use skyflow_lib::engine::io;
+use skyflow_lib::engine::ops::{self, Projection};
+use skyflow_lib::engine::{Engine, LayerKind};
+
+// ---------------------------------------------------------------------------
+// TGA writers used as fixtures
+// ---------------------------------------------------------------------------
+
+fn tga_header(id_len: u8, cmap_type: u8, img_type: u8, w: u16, h: u16, depth: u8, desc: u8) -> Vec<u8> {
+    let mut v = Vec::new();
+    v.push(id_len);
+    v.push(cmap_type);
+    v.push(img_type);
+    v.extend_from_slice(&[0, 0, 0, 0, 0]); // colour map spec
+    v.extend_from_slice(&[0, 0, 0, 0]);    // origin
+    v.extend_from_slice(&w.to_le_bytes());
+    v.extend_from_slice(&h.to_le_bytes());
+    v.push(depth);
+    v.push(desc);
+    v
+}
+
+/// px(x, y) -> (r, g, b, a); y is in *image row order* (row 0 = first stored row).
+fn make_tga(w: usize, h: usize, depth: u8, top_left: bool, rle: bool,
+            px: impl Fn(usize, usize) -> (u8, u8, u8, u8)) -> Vec<u8> {
+    let img_type: u8 = if rle { 10 } else { 2 };
+    let desc = if top_left { 0x20 | (if depth == 32 { 8 } else { 0 }) } else { if depth == 32 { 8 } else { 0 } };
+    let mut out = tga_header(0, 0, img_type, w as u16, h as u16, depth, desc);
+    let bpp = depth as usize / 8;
+
+    // stored rows: row 0 is top row when top_left, else bottom row
+    let stored = |row: usize| -> (usize, usize) { // -> (x, y) in logical coords
+        (0, if top_left { row } else { h - 1 - row })
+    };
+
+    if !rle {
+        for row in 0..h {
+            for x in 0..w {
+                let (_, ly) = stored(row);
+                let (r, g, b, a) = px(x, ly);
+                out.push(b); out.push(g); out.push(r);
+                if depth == 32 { out.push(a); }
+            }
+        }
+        return out;
+    }
+
+    // RLE: encode each row as raw/rle packets
+    for row in 0..h {
+        let (_, ly) = stored(row);
+        let mut row_bytes: Vec<Vec<u8>> = Vec::with_capacity(w);
+        for x in 0..w {
+            let (r, g, b, a) = px(x, ly);
+            let mut p = vec![b, g, r];
+            if depth == 32 { p.push(a); }
+            row_bytes.push(p);
+        }
+        let mut i = 0usize;
+        let mut packets: Vec<u8> = Vec::new();
+        while i < w {
+            // count run length
+            let mut run = 1usize;
+            while i + run < w && run < 128 && row_bytes[i + run] == row_bytes[i] {
+                run += 1;
+            }
+            if run >= 2 {
+                packets.push(0x80 | (run as u8 - 1));
+                packets.extend_from_slice(&row_bytes[i]);
+                i += run;
+            } else {
+                let start = i;
+                let mut lit = 0usize;
+                while i < w && lit < 128 {
+                    let mut r2 = 1usize;
+                    while i + r2 < w && r2 < 3 && row_bytes[i + r2] == row_bytes[i] {
+                        r2 += 1;
+                    }
+                    if r2 >= 2 && i > start { break; }
+                    lit += 1;
+                    i += 1;
+                    if r2 >= 2 { break; }
+                }
+                packets.push((lit as u8) - 1);
+                for k in start..start + lit { packets.extend_from_slice(&row_bytes[k]); }
+            }
+        }
+        out.extend_from_slice(&packets);
+    }
+    out
+}
+
+fn write_tmp(name: &str, data: &[u8]) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join("skyflow_tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join(name);
+    std::fs::write(&p, data).unwrap();
+    p
+}
+
+/// A recognisable pattern: red channel = x, green = y, blue = 64.
+fn pattern(x: usize, y: usize) -> (u8, u8, u8, u8) {
+    (x as u8, y as u8, 64, 255)
+}
+
+// ---------------------------------------------------------------------------
+// TGA import
+// ---------------------------------------------------------------------------
+
+/// Engine without the built-in global-wind layer, so composites start neutral.
+fn bare_engine(size: usize) -> Engine {
+    let mut e = Engine::new(size);
+    assert!(e.remove_layer("wind-default"), "default wind layer should exist");
+    e
+}
+
+fn check_tga(name: &str, depth: u8, top_left: bool, rle: bool) {
+    let (w, h) = (8usize, 8usize);
+    let data = make_tga(w, h, depth, top_left, rle, pattern);
+    let path = write_tmp(name, &data);
+    let buf = io::load_reference(path.to_str().unwrap(), w)
+        .unwrap_or_else(|e| panic!("[{name}] load failed: {e}"));
+    assert_eq!(buf.w, w, "[{name}] width");
+    assert_eq!(buf.h, w, "[{name}] height (should be resized to size x size)");
+    // size == w so no resampling: verify pixels exactly
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * buf.w + x) * 4;
+            assert_eq!(buf.data[i], x as u8, "[{name}] R at ({x},{y})");
+            assert_eq!(buf.data[i + 1], y as u8, "[{name}] G at ({x},{y})");
+            assert_eq!(buf.data[i + 2], 64, "[{name}] B at ({x},{y})");
+        }
+    }
+}
+
+#[test]
+fn tga_24_uncompressed_top_left() { check_tga("t24_tl.tga", 24, true, false); }
+#[test]
+fn tga_24_uncompressed_bottom_left() { check_tga("t24_bl.tga", 24, false, false); }
+#[test]
+fn tga_32_uncompressed_top_left() { check_tga("t32_tl.tga", 32, true, false); }
+#[test]
+fn tga_32_uncompressed_bottom_left() { check_tga("t32_bl.tga", 32, false, false); }
+#[test]
+fn tga_24_rle_top_left() { check_tga("t24r_tl.tga", 24, true, true); }
+#[test]
+fn tga_24_rle_bottom_left() { check_tga("t24r_bl.tga", 24, false, true); }
+#[test]
+fn tga_32_rle_top_left() { check_tga("t32r_tl.tga", 32, true, true); }
+#[test]
+fn tga_32_rle_bottom_left() { check_tga("t32r_bl.tga", 32, false, true); }
+
+/// 16-bit (5-5-5) TGA is common in game assets.
+#[test]
+fn tga_16_uncompressed_top_left() {
+    let (w, h) = (4usize, 4usize);
+    let mut data = tga_header(0, 0, 2, w as u16, h as u16, 16, 0x20);
+    for _ in 0..w * h {
+        // 0 = black, 0x7fff = white
+        data.extend_from_slice(&0x7fffu16.to_le_bytes());
+    }
+    let p = write_tmp("t16.tga", &data);
+    let buf = io::load_reference(p.to_str().unwrap(), w).expect("16-bit TGA must load");
+    for c in buf.data.chunks_exact(4) {
+        assert_eq!(&c[..3], &[248, 248, 248], "white 555 should expand to 248");
+    }
+    let _ = h;
+}
+
+/// A heavily-compressed RLE image is far shorter than the raw pixel count.
+#[test]
+fn tga_rle_smaller_than_raw_is_accepted() {
+    let (w, h) = (64usize, 64usize);
+    let data = make_tga(w, h, 32, true, true, |_, _| (10, 20, 30, 255));
+    assert!(data.len() < 18 + w * h * 4, "fixture should be compressed");
+    let path = write_tmp("flat_rle.tga", &data);
+    let buf = io::load_reference(path.to_str().unwrap(), w).expect("flat RLE TGA must load");
+    let i = 0;
+    assert_eq!(&buf.data[i..i + 3], &[10, 20, 30]);
+}
+
+/// The real-world case: a 2:1 equirectangular sky stretched into the square
+/// working buffer (matching the web version's drawImage behaviour).
+#[test]
+fn tga_equirect_2to1_is_stretched_to_square() {
+    let (w, h) = (16usize, 8usize);
+    let data = make_tga(w, h, 24, true, true, |x, _| (x as u8 * 16, 0, 0, 255));
+    let p = write_tmp("equirect.tga", &data);
+    let buf = io::load_reference(p.to_str().unwrap(), 32).expect("2:1 TGA must load");
+    assert_eq!((buf.w, buf.h), (32, 32), "must be stretched to the working size");
+    // every row should look the same (source varies only along x)
+    let top = buf.data[..32 * 4].to_vec();
+    let bottom = buf.data[(31 * 32 * 4)..].to_vec();
+    assert_eq!(top, bottom, "vertical stretch must be uniform");
+    assert!(top.iter().step_by(4).any(|&v| v > 0), "should carry the gradient");
+}
+
+/// The bug this guards: the WebView cannot decode TGA, so importing one "worked"
+/// in the engine but rendered nothing. Every displayed image must round-trip
+/// through `encode_png_bytes`.
+#[test]
+fn tga_display_path_produces_decodable_png() {
+    let (w, h) = (8usize, 8usize);
+    let data = make_tga(w, h, 32, true, true, pattern);
+    let p = write_tmp("display_rle.tga", &data);
+    let buf = io::load_reference(p.to_str().unwrap(), w).expect("TGA must load");
+
+    let png = io::encode_png_bytes(&buf).expect("must encode to PNG");
+    assert_eq!(&png[..4], &[0x89, b'P', b'N', b'G'], "must be a real PNG");
+    let png_path = write_tmp("display_out.png", &png);
+    let back = io::load_reference(png_path.to_str().unwrap(), w).expect("PNG must decode");
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            assert_eq!(&back.data[i..i + 3], &buf.data[i..i + 3], "pixel ({x},{y})");
+        }
+    }
+}
+
+/// Truncated files must produce an Err, not a panic.
+#[test]
+fn tga_truncated_returns_error() {
+    let data = make_tga(32, 32, 32, true, true, |_, _| (1, 2, 3, 255));
+    let path = write_tmp("trunc.tga", &data[..data.len() / 3]);
+    let res = io::load_reference(path.to_str().unwrap(), 32);
+    assert!(res.is_err(), "truncated TGA must error, not panic");
+}
+
+#[test]
+fn png_roundtrip_via_image_crate() {
+    let mut b = Buf::filled(16, 16, [200, 100, 50, 255]);
+    b.data[0] = 1;
+    let p = write_tmp("ref.png", &[]);
+    io::export_png(&b, false, false, p.to_str().unwrap()).unwrap();
+    let loaded = io::load_reference(p.to_str().unwrap(), 16).unwrap();
+    assert_eq!(loaded.data[0], 1);
+    assert_eq!(loaded.data[1], 100);
+}
+
+// ---------------------------------------------------------------------------
+// Engine behaviour
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fresh_engine_composites_to_neutral() {
+    let mut e = bare_engine(64);
+    e.composite();
+    for c in e.composite.data.chunks_exact(4) {
+        assert_eq!(c[0], 128);
+        assert_eq!(c[1], 128);
+        assert_eq!(c[2], 255);
+    }
+}
+
+#[test]
+fn stroke_changes_pixels_and_reports_dirty_rect() {
+    let mut e = Engine::new(128);
+    let r = e.stroke(&[(0.5, 0.5), (0.56, 0.5)], 20.0, 0.8, 1.0, false, "content", 1, 1.0).expect("stroke");
+    e.composite();
+    let d = e.dirty_rect();
+    assert!(r.2 > 0 && r.3 > 0, "stroke must report a bbox, got {r:?}");
+    assert!(d.2 > 0 && d.3 > 0, "dirty rect must be non-empty, got {d:?}");
+    // centre pixel should have moved away from neutral
+    let i = (64 * 128 + 64) * 4;
+    assert_ne!(e.composite.data[i], 128, "centre pixel should be painted");
+}
+
+#[test]
+fn eraser_restores_neutral() {
+    let mut e = bare_engine(128);
+    e.stroke(&[(0.5, 0.5), (0.6, 0.5)], 40.0, 0.8, 1.0, false, "content", 1, 1.0);
+    e.composite();
+    let i = (64 * 128 + 64) * 4;
+    assert_ne!(e.composite.data[i], 128);
+    // A new stroke id: the eraser is a separate drag, so it deposits again.
+    // Reusing id 1 would make it a continuation of the stroke it is undoing,
+    // and the engine would (correctly) treat the pixel as already saturated.
+    e.stroke(&[(0.5, 0.5), (0.6, 0.5)], 40.0, 0.8, 1.0, true, "content", 2, 1.0);
+    e.composite();
+    assert_eq!(e.composite.data[i], 128, "eraser should restore neutral");
+}
+
+#[test]
+fn wind_layer_generates_non_neutral_field() {
+    let mut e = Engine::new(64);
+    e.add_layer(LayerKind::Wind);
+    e.composite();
+    let changed = e.composite.data.chunks_exact(4).filter(|c| c[0] != 128 || c[1] != 128).count();
+    assert!(changed > 64 * 64 / 4, "wind should affect a large area, got {changed}");
+}
+
+#[test]
+fn wind_direction_change_updates_field() {
+    let mut e = Engine::new(64);
+    let id = e.add_layer(LayerKind::Wind);
+    e.composite();
+    let before = e.composite.data.clone();
+    e.layer_mut(&id).unwrap().p.direction = 270.0;
+    e.layer_mut(&id).unwrap().wind_dirty = true;
+    e.composite();
+    assert_ne!(before, e.composite.data, "changing direction must change the field");
+}
+
+#[test]
+fn hidden_layer_is_excluded() {
+    let mut e = bare_engine(64);
+    let id = e.add_layer(LayerKind::Wind);
+    e.composite();
+    assert!(e.composite.data.chunks_exact(4).any(|c| c[0] != 128 || c[1] != 128));
+    e.layer_mut(&id).unwrap().p.visible = false;
+    e.composite();
+    assert!(e.composite.data.chunks_exact(4).all(|c| c[0] == 128 && c[1] == 128),
+        "hidden layer must not contribute");
+}
+
+#[test]
+fn default_engine_has_wind_layer() {
+    let mut e = Engine::new(64);
+    assert_eq!(e.layers.len(), 2, "paint + default wind");
+    e.composite();
+    assert!(e.composite.data.chunks_exact(4).any(|c| c[0] != 128 || c[1] != 128));
+}
+
+#[test]
+fn undo_redo_restores_pixels() {
+    let mut e = Engine::new(64);
+    e.save_history();                                    // clean state
+    e.stroke(&[(0.5, 0.5), (0.68, 0.5)], 30.0, 0.8, 1.0, false, "content", 1, 1.0);
+    e.composite();
+    e.save_history();
+    let painted = e.composite.data.clone();
+    assert!(e.undo());
+    e.composite();
+    assert_ne!(painted, e.composite.data, "undo must change pixels back");
+    assert!(e.redo());
+    e.composite();
+    assert_eq!(painted, e.composite.data, "redo must restore painted pixels");
+}
+
+#[test]
+fn obstacle_mask_drives_blue_channel() {
+    let mut e = Engine::new(64);
+    let id = e.add_layer(LayerKind::Obstacle);
+    e.stroke(&[(0.5, 0.5)], 40.0, 0.9, 1.0, false, "mask", 1, 1.0);
+    e.composite();
+    let i = (32 * 64 + 32) * 4;
+    assert!(e.composite.data[i + 2] < 255, "obstacle mask must lower B, got {}", e.composite.data[i + 2]);
+    let _ = id;
+}
+
+#[test]
+fn project_save_load_roundtrip() {
+    let mut e = Engine::new(64);
+    e.stroke(&[(0.4, 0.4)], 30.0, 0.8, 1.0, false, "content", 1, 1.0);
+    e.composite();
+    let expected = e.composite.data.clone();
+
+    let path = write_tmp("proj.skyflow", &[]);
+    io::save_project(&e, path.to_str().unwrap()).expect("save");
+
+    let mut loaded = io::load_project(path.to_str().unwrap()).expect("load");
+    loaded.composite();
+    assert_eq!(loaded.layers.len(), e.layers.len());
+    assert_eq!(expected, loaded.composite.data, "roundtrip must preserve pixels");
+}
+
+#[test]
+fn project_file_with_bad_magic_is_rejected() {
+    let path = write_tmp("bad.skyflow", b"NOTATGA- rubbish");
+    assert!(io::load_project(path.to_str().unwrap()).is_err());
+}
+
+#[test]
+fn export_tga_writes_valid_header() {
+    let b = Buf::filled(8, 8, [10, 20, 30, 255]);
+    let p = write_tmp("out.tga", &[]);
+    io::export_tga(&b, false, false, p.to_str().unwrap()).unwrap();
+    let raw = std::fs::read(&p).unwrap();
+    assert_eq!(&raw[..3], &[0, 0, 2], "id_len=0, no colour map, uncompressed true-colour");
+    assert_eq!(raw[2], 2, "uncompressed true-colour");
+    assert_eq!(u16::from_le_bytes([raw[12], raw[13]]), 8);
+    assert_eq!(raw[16], 32);
+    assert_eq!(raw[17], 0x28);
+    assert_eq!(raw.len(), 18 + 8 * 8 * 4);
+}
+
+#[test]
+fn export_png_respects_channel_inversion() {
+    let b = Buf::filled(8, 8, [10, 20, 30, 255]);
+    let p = write_tmp("inv.png", &[]);
+    io::export_png(&b, true, false, p.to_str().unwrap()).unwrap();
+    let back = io::load_reference(p.to_str().unwrap(), 8).unwrap();
+    assert_eq!(back.data[0], 255 - 10, "R must be inverted");
+    assert_eq!(back.data[1], 20, "G untouched");
+}
+
+#[test]
+fn export_upscales_to_target_size() {
+    let b = Buf::filled(8, 8, [10, 20, 30, 255]);
+    let p = write_tmp("up.png", &[]);
+    io::export(&b, p.to_str().unwrap(), false, false, Some(64)).unwrap();
+    let back = io::load_reference(p.to_str().unwrap(), 64).unwrap();
+    assert_eq!(back.w, 64);
+    assert_eq!(back.data[0], 10);
+}
+
+#[test]
+fn upscale_preserves_constants() {
+    let b = Buf::filled(8, 8, [77, 88, 99, 255]);
+    let u = ops::upscale(&b, 32, 32);
+    assert!(u.data.chunks_exact(4).all(|c| c[0] == 77 && c[1] == 88 && c[2] == 99));
+}
+
+#[test]
+fn blur_is_seamless_around_equirect_edge() {
+    let n = 64;
+    let mut b = Buf::new(n, n);
+    // paint a blob straddling the u=0 seam
+    for y in 28..36 {
+        for x in 0..4 {
+            let i = (y * n + x) * 4;
+            b.data[i..i + 4].copy_from_slice(&[200, 100, 50, 255]);
+            let j = (y * n + (n - 1 - x)) * 4;
+            b.data[j..j + 4].copy_from_slice(&[200, 100, 50, 255]);
+        }
+    }
+    let out = ops::blur(&b, 6.0);
+    // the wrap-around neighbours must have picked up some of the blob
+    let left = out.data[(32 * n + (n - 2)) * 4];
+    let right = out.data[(32 * n + 2) * 4];
+    assert!(left > 0 && right > 0, "blur must wrap horizontally: left={left} right={right}");
+}
+
+#[test]
+fn generate_wind_polar_leaves_outside_disc_neutral() {
+    let mut b = Buf::new(64, 64);
+    ops::generate_wind(&mut b, 45.0, 0.8, Projection::Polar, 90.0);
+    let corner = b.data[0];
+    assert_eq!(corner, 128, "outside the polar disc must stay neutral");
+}
+
+// ---------------------------------------------------------------------------
+// Obstacle masks
+// ---------------------------------------------------------------------------
+
+#[test]
+fn obstacle_mask_starts_empty_not_opaque() {
+    // The mask used to be initialised to opaque white, which meant the first
+    // dab turned the *entire* sky into an obstacle (B = 0 everywhere) and the
+    // painted area was invisible.
+    let mut e = bare_engine(64);
+    let id = e.add_layer(LayerKind::Obstacle);
+    e.active = id.clone();
+    e.stroke(&[(0.5, 0.5)], 20.0, 0.25, 1.0, false, "mask", 1, 1.0);
+    let mask = e.layer(&id).unwrap().mask.as_ref().expect("stroke must create a mask");
+    let far = mask.data[(0 * 64 + 0) * 4 + 3];
+    assert_eq!(far, 0, "untouched mask pixels must stay empty, got alpha={far}");
+}
+
+#[test]
+fn obstacle_stroke_marks_only_the_painted_area() {
+    let n = 64;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Obstacle);
+    e.active = id.clone();
+
+    e.composite();
+    assert_eq!(e.composite.data[2], 255, "an unused obstacle layer must not block anything");
+
+    e.stroke(&[(0.5, 0.5)], 20.0, 0.25, 1.0, false, "mask", 1, 1.0);
+    e.composite();
+
+    let core = e.composite.data[(32 * n + 32) * 4 + 2];
+    assert!(core < 40, "obstacle core must be immobile (B low), got B={core}");
+    let corner = e.composite.data[2];
+    assert_eq!(corner, 255, "the rest of the sky must stay mobile, got B={corner}");
+}
+
+#[test]
+fn obstacle_paint_works_without_a_target_hint() {
+    // "content" is not a real destination for an adjustment layer, so the
+    // brush must fall back to the mask instead of silently doing nothing.
+    let n = 64;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Obstacle);
+    e.active = id.clone();
+    e.stroke(&[(0.5, 0.5)], 20.0, 0.25, 1.0, false, "content", 1, 1.0);
+    e.composite();
+    let core = e.composite.data[(32 * n + 32) * 4 + 2];
+    assert!(core < 40, "painting an obstacle layer must always hit the mask, got B={core}");
+}
+
+// ---------------------------------------------------------------------------
+// Layer stacking
+// ---------------------------------------------------------------------------
+
+/// The layer list is drawn top-first; the engine stores bottom-first.
+fn stack(e: &Engine) -> Vec<String> {
+    e.layers.iter().rev().map(|l| l.p.id.clone()).collect()
+}
+
+#[test]
+fn reorder_visual_moves_layers_in_the_top_first_ordering() {
+    // The UI sends indices into the reversed list, so the mapping has to be
+    // inverted here. Getting it backwards moved the wrong layer.
+    let mut e = bare_engine(16);
+    let b = e.add_layer(LayerKind::Paint);
+    let c = e.add_layer(LayerKind::Paint);
+    let base = "layer-1".to_string();
+    assert_eq!(stack(&e), vec![c.clone(), b.clone(), base.clone()]);
+
+    e.reorder_visual(0, 2); // drag the top row to the bottom
+    assert_eq!(stack(&e), vec![b.clone(), base.clone(), c.clone()]);
+
+    e.reorder_visual(2, 0); // and back
+    assert_eq!(stack(&e), vec![c, b, base]);
+}
+
+#[test]
+fn a_flow_layer_above_an_obstacle_covers_it() {
+    // The B channel used to be written in a second pass *after* the
+    // compositing loop, which made every obstacle unconditional: paint as much
+    // flow as you like on a layer above it and the pixel still read as
+    // immobile. A layer stacked on top has to win, the same way it wins on
+    // every other channel.
+    let n = 64;
+    let mut e = bare_engine(n);
+    let obs = e.add_layer(LayerKind::Obstacle);
+    e.active = obs.clone();
+    e.stroke(&[(0.5, 0.5)], 20.0, 0.25, 1.0, false, "mask", 1, 1.0);
+    e.reorder_visual(0, 1); // push the obstacle under the paint layer
+
+    let at = |e: &Engine| e.composite.data[(32 * n + 32) * 4 + 2];
+    e.composite();
+    let blocked = at(&e);
+    assert!(blocked < 40, "nothing painted above: the obstacle must block, got B={blocked}");
+
+    e.active = "layer-1".to_string();
+    // Two points: a single sample has no direction, and a paint layer with no
+    // direction is deliberately a no-op.
+    e.stroke(&[(0.5, 0.5), (0.56, 0.5)], 40.0, 0.8, 0.6, false, "content", 2, 1.0);
+    e.composite();
+    let covered = at(&e);
+    assert!(covered > 240, "flow painted above an obstacle must un-block it, got B={covered}");
+}
+
+#[test]
+fn an_obstacle_above_a_flow_layer_still_blocks() {
+    // The mirror case: order has to matter in both directions, otherwise
+    // fixing the bug above would just have disabled obstacles entirely.
+    let n = 64;
+    let mut e = bare_engine(n);
+    let at = |e: &Engine| e.composite.data[(32 * n + 32) * 4 + 2];
+
+    e.active = "layer-1".to_string();
+    e.stroke(&[(0.5, 0.5), (0.56, 0.5)], 40.0, 0.8, 0.6, false, "content", 1, 1.0);
+    e.composite();
+    assert!(at(&e) > 240, "a painted flow layer should be mobile");
+
+    let obs = e.add_layer(LayerKind::Obstacle); // appended, so it sits on top
+    e.active = obs;
+    e.stroke(&[(0.5, 0.5)], 20.0, 0.25, 1.0, false, "mask", 2, 1.0);
+    e.composite();
+    let blocked = at(&e);
+    assert!(blocked < 40, "an obstacle stacked on top must still block flow, got B={blocked}");
+}
+
+#[test]
+fn a_lower_obstacle_keeps_blocking_outside_the_painted_area() {
+    // Coverage is per-pixel: painting over part of an obstacle must not
+    // release the rest of it.
+    let n = 64;
+    let mut e = bare_engine(n);
+    let obs = e.add_layer(LayerKind::Obstacle);
+    e.active = obs.clone();
+    // `size` is a diameter, so 48 is a 24px-radius blob — comfortably wider
+    // than the dab below.
+    e.stroke(&[(0.5, 0.5)], 48.0, 0.25, 1.0, false, "mask", 1, 1.0);
+    e.reorder_visual(0, 1);
+
+    e.active = "layer-1".to_string();
+    // A short drag left of centre only; the obstacle is much wider.
+    e.stroke(&[(0.38, 0.5), (0.42, 0.5)], 12.0, 0.8, 0.6, false, "content", 2, 1.0);
+    e.composite();
+
+    let freed = e.composite.data[(32 * n + 26) * 4 + 2];
+    let still = e.composite.data[(32 * n + 40) * 4 + 2];
+    assert!(freed > 240, "the painted spot must be released, got B={freed}");
+    assert!(still < 40, "the rest of the obstacle must stay put, got B={still}");
+}
+
+#[test]
+fn wind_mask_also_starts_empty() {
+    let mut e = bare_engine(64);
+    let id = e.add_layer(LayerKind::Wind);
+    e.active = id.clone();
+    e.stroke(&[(0.5, 0.5)], 20.0, 0.25, 1.0, false, "mask", 1, 1.0);
+    let mask = e.layer(&id).unwrap().mask.as_ref().expect("mask created");
+    assert_eq!(mask.data[3], 0, "untouched wind mask must be empty");
+    assert!(mask.data[(32 * 64 + 32) * 4 + 3] > 200, "painted wind mask must be active");
+}
+
+// ---------------------------------------------------------------------------
+// Brush softness
+// ---------------------------------------------------------------------------
+
+#[test]
+fn brush_falloff_is_monotonic_and_soft() {
+    let n = 64;
+    let mut b = Buf::new(n, n);
+    let st = ops::StampStyle { r: 0, g: 0, b: 0, erase: false, opaque: false, flow: 1.0 };
+    ops::stamp(&mut b, 32.0, 32.0, 32.0, 32.0, 40.0, 0.0, &st, None);
+
+    let at = |d: i32| b.data[(32 * n + (32 + d as usize)) * 4 + 3] as i32;
+    let mut prev = 256;
+    for d in 0..21 {
+        let a = at(d);
+        assert!(a <= prev, "alpha must decrease monotonically at d={d}: {a} > {prev}");
+        prev = a;
+    }
+    let (core, mid, rim) = (at(0), at(13), at(18));
+    assert!(core > mid && mid > rim, "expected a soft gradient, got {core}/{mid}/{rim}");
+    assert_eq!(at(21), 0, "outside the radius nothing may be written");
+}
+
+#[test]
+fn soft_brush_keeps_a_solid_body() {
+    // `core = radius * hardness` gave hardness 0 a brush with no plateau at all:
+    // coverage started falling from dead centre, so the stroke read as a haze
+    // rather than a soft brush. A plateau of at least a third of the radius is
+    // the Blender-ish behaviour we want.
+    let radius = 40.0f32;
+    let n = 128;
+    let mut b = Buf::new(n, n);
+    let st = ops::StampStyle { r: 255, g: 255, b: 255, erase: false, opaque: false, flow: 1.0 };
+    ops::stamp(&mut b, 64.0, 64.0, 64.0, 64.0, radius * 2.0, 0.0, &st, None);
+
+    let probe = ops::CORE_MIN * radius - 0.5; // just inside the plateau edge
+    let d = probe.floor() as usize;
+    let alpha = b.data[(64 * n + 64 + d) * 4 + 3];
+    assert_eq!(alpha, 255, "the plateau must be at full strength, got {alpha} at d={d}");
+}
+
+#[test]
+fn hardness_only_ever_widens_the_plateau() {
+    // Hardness must not trade plateau width for shoulder width in a way that
+    // makes a harder brush *softer* somewhere.
+    let n = 128;
+    let st = ops::StampStyle { r: 255, g: 255, b: 255, erase: false, opaque: false, flow: 1.0 };
+    let alpha_at = |hardness: f32, d: usize| {
+        let mut b = Buf::new(n, n);
+        ops::stamp(&mut b, 64.0, 64.0, 64.0, 64.0, 80.0, hardness, &st, None);
+        b.data[(64 * n + 64 + d) * 4 + 3] as i32
+    };
+    for d in [10usize, 20, 28, 34] {
+        assert!(
+            alpha_at(0.9, d) >= alpha_at(0.1, d),
+            "hardness 0.9 is softer than 0.1 at d={d}: {} vs {}",
+            alpha_at(0.9, d), alpha_at(0.1, d)
+        );
+    }
+}
+
+#[test]
+fn stamp_profile_is_independent_of_segment_length() {
+    // Distance-to-segment rather than a train of dabs: dragging fast must not
+    // harden the edge, because overlapped dabs used to accumulate as 1-(1-a)^n.
+    let n = 128;
+    let st = ops::StampStyle { r: 255, g: 255, b: 255, erase: false, opaque: false, flow: 1.0 };
+    let mut dab = Buf::new(n, n);
+    let mut drag = Buf::new(n, n);
+    ops::stamp(&mut dab, 64.0, 64.0, 64.0, 64.0, 40.0, 0.0, &st, None);
+    ops::stamp(&mut drag, 96.0, 64.0, 32.0, 64.0, 40.0, 0.0, &st, None);
+
+    for dy in 0..20 {
+        let y = (64 + dy) * n + 64;
+        let a = dab.data[y * 4 + 3] as i32;
+        let b = drag.data[y * 4 + 3] as i32;
+        assert!((a - b).abs() <= 2, "profile drifted at dy={dy}: dab={a} drag={b}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Straight-alpha contract: no dark fringe, no beading
+// ---------------------------------------------------------------------------
+
+#[test]
+fn blur_vertical_step_is_monotonic_and_symmetric() {
+    // The vertical box pass used to slide its window with x instead of y, so it
+    // wrote mean(rows y-r+x .. y+r+x) into column x — a diagonal smear that made
+    // every blurred layer and every obstacle disturbance noisy. A hard vertical
+    // step is the cheapest thing that catches it: the ramp must be monotonic
+    // and symmetric about the step.
+    let n = 64;
+    let mut b = Buf::new(n, n);
+    for y in 0..32 {
+        for x in 0..n {
+            let i = (y * n + x) * 4;
+            b.data[i] = 255;
+            b.data[i + 3] = 255;
+        }
+    }
+    let out = ops::blur(&b, 8.0);
+    let col = |y: usize| out.data[(y * n + 32) * 4 + 3] as i32;
+
+    let mut prev = 256;
+    for y in 0..n {
+        let v = col(y);
+        assert!(v <= prev, "alpha must fall monotonically, y={y}: {v} > {prev}");
+        prev = v;
+    }
+    // step sits between rows 31 and 32, so the profile must mirror around it
+    for d in 0..16 {
+        let (a, z) = (col(31 - d), col(32 + d));
+        assert!((a + z - 255).abs() <= 6, "ramp is not symmetric at d={d}: {a} vs {z}");
+    }
+    assert!(col(0) > 250 && col(63) == 0);
+}
+
+#[test]
+fn blur_preserves_straight_colour_in_the_fringe() {
+    // Buffers are straight alpha. A blur that forgets to premultiply drags the
+    // RGB of transparent pixels (all zeroes — black) into the semi-transparent
+    // fringe, which is one way a stroke grows a dark halo.
+    let n = 64;
+    let mut b = Buf::new(n, n);
+    for y in 16..48 {
+        for x in 16..48 {
+            let i = (y * n + x) * 4;
+            b.data[i] = 200;
+            b.data[i + 1] = 60;
+            b.data[i + 2] = 255;
+            b.data[i + 3] = 255;
+        }
+    }
+    let out = ops::blur(&b, 8.0);
+
+    let out = ops::blur(&b, 8.0);
+
+    // Only trust samples where the unpremultiply is not amplifying u8 rounding
+    // beyond a level or two. A real premultiply bug would scale R by alpha,
+    // e.g. 63 instead of 200, so a small tolerance still catches it.
+    let mut checked = 0;
+    for y in 0..n {
+        for x in 0..n {
+            let i = (y * n + x) * 4;
+            let a = out.data[i + 3];
+            if a < 80 || a > 215 {
+                continue;
+            }
+            let (r, g) = (out.data[i] as i32, out.data[i + 1] as i32);
+            assert!(
+                (r - 200).abs() <= 6 && (g - 60).abs() <= 6,
+                "fringe colour was scaled by alpha at ({x},{y}): R={r} G={g} A={a}"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 20, "need fringe samples for this to mean anything, got {checked}");
+}
+
+#[test]
+fn painted_stroke_has_no_dark_fringe() {
+    // The composite used to dip *below* the neutral 128 round the rim of a
+    // stroke, because the brush stored premultiplied RGB and `blend_over`
+    // applied alpha a second time. That reads as a dark ring round the brush.
+    let n = 128;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+
+    // drag right -> left: vx = -1, so the flow colour is R=255, G=128
+    let pts: Vec<(f32, f32)> = (0..40).map(|i| (0.75 - i as f32 * 0.01, 0.5)).collect();
+    e.stroke(&pts, 40.0, 0.25, 1.0, false, "content", 1, 1.0);
+    e.composite();
+
+    let y = n / 2;
+    let mut peak = 0;
+    for x in 0..n {
+        let r = e.composite.data[(y * n + x) * 4] as i32;
+        assert!(r >= 126, "composite dips below neutral at x={x}: R={r}");
+        assert!(r <= 255);
+        peak = peak.max(r);
+    }
+    assert!(peak > 240, "the stroke core never reached its colour, peak R={peak}");
+}
+
+#[test]
+fn stroke_coverage_does_not_bead_at_segment_joins() {
+    // source-over coverage accumulates as 1-(1-a)^n wherever two segments
+    // overlap, rippling the rim with the pointer sampling period — the
+    // "string of beads" look. Coverage must be a union instead.
+    let n = 256;
+    let st = ops::StampStyle { r: 255, g: 255, b: 255, erase: false, opaque: false, flow: 1.0 };
+    let mut b = Buf::new(n, n);
+
+    let mut px = 40.0f32;
+    while px < 216.0 {
+        ops::stamp(&mut b, px + 4.0, 128.0, px, 128.0, 40.0, 0.0, &st, None);
+        px += 4.0;
+    }
+
+    // Sample the shoulder, ~half coverage. Along a straight run this must be
+    // flat. With hardness 0 the plateau is CORE_MIN * 20 = 8 px and the
+    // shoulder runs 8..20, so |dy| = 13.5 lands mid-shoulder.
+    let rim_y = 114;
+    let vals: Vec<i32> = (60..200).map(|x| b.data[(rim_y * n + x) * 4 + 3] as i32).collect();
+    let (mn, mx) = (*vals.iter().min().unwrap(), *vals.iter().max().unwrap());
+    assert!(mx > 80, "rim is not partially covered at all, max alpha={mx}");
+    assert!(mx - mn <= 2, "coverage ripples along the stroke: min={mn} max={mx}");
+}
+
+// ---------------------------------------------------------------------------
+// Stroke batches: every frame's first sample must not invent a direction
+// ---------------------------------------------------------------------------
+
+/// Pixels that disagree with all four neighbours while those neighbours agree
+/// among themselves — i.e. isolated dots.
+fn count_isolated_dots(b: &Buf, rgb_thresh: i32, neighbour_spread: i32) -> usize {
+    let n = b.w;
+    let at = |x: usize, y: usize| -> (i32, i32) {
+        let i = (y * n + x) * 4;
+        (b.data[i] as i32, b.data[i + 1] as i32)
+    };
+    let mut dots = 0;
+    for y in 1..n - 1 {
+        for x in 1..n - 1 {
+            if b.data[(y * n + x) * 4 + 3] < 8 {
+                continue;
+            }
+            let nb = [at(x - 1, y), at(x + 1, y), at(x, y - 1), at(x, y + 1)];
+            let (lo_r, lo_g) = nb.iter().fold((999, 999), |a, p| (a.0.min(p.0), a.1.min(p.1)));
+            let (hi_r, hi_g) = nb.iter().fold((-999, -999), |a, p| (a.0.max(p.0), a.1.max(p.1)));
+            if (hi_r - lo_r).max(hi_g - lo_g) > neighbour_spread {
+                continue;
+            }
+            let me = at(x, y);
+            let dev = (me.0 - lo_r).abs().max((me.0 - hi_r).abs())
+                .max((me.1 - lo_g).abs()).max((me.1 - hi_g).abs());
+            if dev > rgb_thresh {
+                dots += 1;
+            }
+        }
+    }
+    dots
+}
+
+#[test]
+fn first_sample_of_a_batch_uses_the_real_direction() {
+    // The first sample has no incoming segment, and it used to fake one with a
+    // 0.01px horizontal offset — so it always stamped `vx = +1`, i.e. a hard
+    // saturated blue dot pointing right. Dragging straight down must instead
+    // paint the downward direction from the very first dab.
+    let n = 128;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+    e.stroke(&[(0.5, 0.3), (0.5, 0.7)], 40.0, 0.25, 1.0, false, "content", 1, 1.0);
+
+    let buf = e.layer(&id).unwrap().buf.clone();
+    // Straight down: vx = 0, vy = 1 -> (128, 255, 255).
+    let r = buf.data[((n / 2) * n + n / 2) * 4] as i32;
+    let g = buf.data[((n / 2) * n + n / 2) * 4 + 1] as i32;
+    assert!((r - 128).abs() < 40, "first dab kept the fake rightward direction: R={r}");
+    assert!(g > 200, "downward flow should push G up, got G={g}");
+}
+
+#[test]
+fn a_lone_point_only_paints_a_mask() {
+    // A click without movement carries no direction. Inventing one is exactly
+    // how the speckle bug started, so on a paint layer it is a no-op; the next
+    // batch re-sends this sample as its first element and paints the real
+    // segment.
+    let n = 64;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+    e.stroke(&[(0.5, 0.5)], 40.0, 0.25, 1.0, false, "content", 1, 1.0);
+    let buf = e.layer(&id).unwrap().buf.clone();
+    assert!(buf.data.iter().all(|&v| v == 0), "a directionless point must not paint");
+
+    // A mask has no direction in the first place, so a click there is a real
+    // dab and must land.
+    let mid = e.add_layer(LayerKind::Obstacle);
+    e.active = mid.clone();
+    e.stroke(&[(0.5, 0.5)], 40.0, 0.25, 1.0, false, "mask", 1, 1.0);
+    let mask = e.layer(&mid).unwrap().mask.as_ref().expect("mask created").clone();
+    assert!(mask.data[(32 * n + 32) * 4 + 3] > 200, "a click must mark the mask");
+}
+
+#[test]
+fn batch_strokes_do_not_speckle() {
+    // End-to-end guard for the artefact the user reported: the frontend sends
+    // `[lastPoint, ...pointsThisFrame]` once per animation frame, so a stroke is
+    // many small batches. Every batch's first sample used to leave a wrong-
+    // coloured dot, which showed up as a dotted line of saturated pixels along
+    // the stroke.
+    let n = 256;
+    let mut e = Engine::new(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+
+    let mut last: Option<(f32, f32)> = None;
+    for k in 0..420 {
+        let a = (k as f32 / 420.0) * std::f32::consts::TAU * 2.2;
+        let rad = 20.0 + k as f32 * 0.22;
+        let p = (0.5 + a.cos() * rad / n as f32, 0.5 + a.sin() * rad / n as f32);
+        // one frame's worth, exactly like PaintView's flush loop
+        let pts: Vec<(f32, f32)> = match last {
+            Some(q) => vec![q, p],
+            None => vec![p],
+        };
+        e.stroke(&pts, 60.0, 0.25, 0.8, false, "content", 1, 1.0);
+        last = Some(p);
+    }
+
+    let buf = e.layer(&id).unwrap().buf.clone();
+    assert!(buf.data.chunks_exact(4).any(|c| c[3] > 200), "the stroke should be painted");
+    let dots = count_isolated_dots(&buf, 25, 8);
+    assert_eq!(dots, 0, "{dots} isolated colour dots along the stroke");
+}
+
+#[test]
+fn overlapping_soft_strokes_do_not_switch_colour_per_pixel() {
+    // Two sets of soft strokes at right angles. Where their shoulders overlap
+    // the two coverages are nearly equal, so a winner-take-all colour rule made
+    // the result depend on which side of a 1/255 bucket each stamp landed in —
+    // a seam that shatters into scattered single pixels.
+    let n = 256;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+    for step in 0..16 {
+        let t = step as f32 / 15.0;
+        let sid = step as u64 + 1;
+        e.stroke(&[(0.15, 0.35 + t * 0.3), (0.85, 0.35 + t * 0.3)], 70.0, 0.5, 0.7, false, "content", sid, 1.0);
+        e.stroke(&[(0.35 + t * 0.3, 0.15), (0.35 + t * 0.3, 0.85)], 70.0, 0.5, 0.7, false, "content", sid + 1000, 1.0);
+    }
+    let buf = e.layer(&id).unwrap().buf.clone();
+    let dots = count_isolated_dots(&buf, 25, 8);
+    assert_eq!(dots, 0, "{dots} isolated colour dots where the strokes overlap");
+}
+
+#[test]
+fn repeated_passes_do_not_build_up_opacity() {
+    // Union coverage, Photoshop-style: going over the same spot twice must not
+    // darken or harden it.
+    let n = 64;
+    let st = ops::StampStyle { r: 255, g: 255, b: 255, erase: false, opaque: false, flow: 1.0 };
+    let mut b = Buf::new(n, n);
+    for _ in 0..5 {
+        ops::stamp(&mut b, 32.0, 32.0, 32.0, 32.0, 40.0, 0.25, &st, None);
+    }
+    let a = b.data[(32 * n + 38) * 4 + 3];
+    let mut once = Buf::new(n, n);
+    ops::stamp(&mut once, 32.0, 32.0, 32.0, 32.0, 40.0, 0.25, &st, None);
+    let a1 = once.data[(32 * n + 38) * 4 + 3];
+    assert_eq!(a, a1, "alpha built up from {a1} to {a} over repeated passes");
+}
+
+#[test]
+fn hardest_brush_still_antialiases_its_rim() {
+    // hardness = 1 must not produce a jagged binary disc.
+    let n = 64;
+    let mut b = Buf::new(n, n);
+    let st = ops::StampStyle { r: 0, g: 0, b: 0, erase: false, opaque: false, flow: 1.0 };
+    ops::stamp(&mut b, 32.0, 32.0, 32.0, 32.0, 40.0, 1.0, &st, None);
+    let at = |d: i32| b.data[(32 * n + (32 + d as usize)) * 4 + 3];
+    let rim = at(19);
+    assert!(rim > 0 && rim < 255, "the outermost pixel must be a partial value, got {rim}");
+    assert_eq!(at(21), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Brush flow: a low-strength brush has to build up over repeated strokes
+// ---------------------------------------------------------------------------
+
+/// One short horizontal drag across the middle of the layer.
+/// One short horizontal drag across the middle of the layer.
+fn drag(e: &mut Engine, strength: f32, flow: f32, stroke_id: u64) {
+    e.stroke(&[(0.5, 0.5), (0.56, 0.5)], 40.0, 0.8, strength, false, "content", stroke_id, flow);
+}
+
+/// What you actually see at the centre: the composite's offset from neutral.
+/// The drag goes right, so `128 - R` is the flow magnitude.
+fn centre(e: &mut Engine) -> f32 {
+    e.composite();
+    let n = e.size;
+    let i = ((n / 2) * n + (n / 2)) * 4;
+    128.0 - e.composite.data[i] as f32
+}
+#[test]
+fn strength_is_the_ceiling_not_the_rate() {
+    // The bug this replaces: strength used to be the deposit rate with the
+    // ceiling pinned at full, so a gentle brush crept up to full strength if
+    // you kept painting. "This area flows gently" has to stay gentle.
+    let n = 128;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+
+    let ceiling = 0.3 * 127.0;
+    let mut vals = Vec::new();
+    for k in 1..=20u64 {
+        drag(&mut e, 0.3, 0.25, k);
+        vals.push(centre(&mut e));
+    }
+    for w in vals.windows(2) {
+        assert!(w[1] >= w[0], "must build up monotonically: {vals:?}");
+    }
+    assert!(vals[0] < ceiling * 0.4, "first pass should be well under the ceiling: {}", vals[0]);
+    for v in &vals {
+        assert!(*v <= ceiling + 2.0, "must never pass the strength you set: {v} vs {ceiling}");
+    }
+    assert!((vals[19] - ceiling).abs() < 2.0, "twenty passes should reach it: {}", vals[19]);
+}
+
+#[test]
+fn flow_only_changes_how_fast_you_get_there() {
+    // Same strength, two flows: one pass vs many. The destination is identical.
+    let n = 128;
+    let mut slow = bare_engine(n);
+    let sid = slow.add_layer(LayerKind::Paint);
+    slow.active = sid.clone();
+    drag(&mut slow, 0.3, 0.25, 1);
+
+    let mut fast = bare_engine(n);
+    let fid = fast.add_layer(LayerKind::Paint);
+    fast.active = fid.clone();
+    drag(&mut fast, 0.3, 1.0, 1);
+
+    let s = centre(&mut slow);
+    let f = centre(&mut fast);
+    assert!(f > s * 3.0, "flow 1 should land in one pass: {s} vs {f}");
+    assert!((f - 0.3 * 127.0).abs() < 2.0, "and exactly at the ceiling: {f}");
+
+    for k in 2..=20u64 {
+        drag(&mut slow, 0.3, 0.25, k);
+    }
+    assert!((centre(&mut slow) - f).abs() < 2.0,
+        "slow and fast must converge on the same place");
+}
+
+#[test]
+fn one_drag_does_not_double_deposit_where_it_crosses_itself() {
+    // Same id = same drag. Overlap inside a drag must not compound, or the
+    // middle of the stroke saturates while the ends stay faint — the beading
+    // problem wearing a different hat.
+    let mut e = bare_engine(128);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+    drag(&mut e, 1.0, 0.25, 1);
+    let first = centre(&mut e);
+    for _ in 0..11 {
+        drag(&mut e, 1.0, 0.25, 1);
+    }
+    let after = centre(&mut e);
+    assert!((after - first).abs() < 1.5,
+        "a single drag must deposit once per pixel, got {first} then {after}");
+}
+
+#[test]
+fn coverage_builds_up_so_the_wind_fades_out_gradually() {
+    // Why the build-up lives in coverage rather than in the colour: what you
+    // see is `alpha * mine + (1-alpha) * wind`, so the vector rotates from the
+    // wind towards the stroke instead of the wind being cut off on pass one.
+    let n = 128;
+    let mut e = Engine::new(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+    e.composite();
+    let wind = e.composite.data[((n / 2) * n + (n / 2)) * 4] as f32;
+
+    // Drag right: the target is R = 1.
+    let mut vals = Vec::new();
+    for k in 1..=16u64 {
+        drag(&mut e, 1.0, 0.2, k);
+        e.composite();
+        vals.push(e.composite.data[((n / 2) * n + (n / 2)) * 4] as f32);
+    }
+    for w in vals.windows(2) {
+        assert!(w[1] <= w[0], "should head for the new direction: {vals:?}");
+    }
+    // One pass at flow 0.2 should cover ~20% of the distance to the target,
+    // not jump most of the way.
+    let full = wind - 1.0;
+    assert!((wind - vals[0]) < full * 0.30,
+        "one light pass must not cut the wind off, went {wind} -> {}", vals[0]);
+    assert!(vals[15] < 12.0, "sixteen passes should have taken over: {}", vals[15]);
+}
+
+#[test]
+fn eraser_builds_up_towards_neutral() {
+    // Symmetric with painting: a low-flow eraser peels the stroke away a bit
+    // at a time instead of wiping it.
+    let n = 128;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+    drag(&mut e, 1.0, 1.0, 1);
+    assert!(centre(&mut e) > 125.0);
+
+    let mut vals = Vec::new();
+    for k in 2..=14u64 {
+        e.stroke(&[(0.5, 0.5), (0.56, 0.5)], 40.0, 0.8, 1.0, true, "content", k, 0.3);
+        vals.push(centre(&mut e));
+    }
+    for w in vals.windows(2) {
+        // `<=` because 8-bit bottoms out: once the offset rounds to 1 it stays.
+        assert!(w[1] <= w[0], "erasing must fade monotonically: {vals:?}");
+    }
+    assert!(vals[12] < 4.0, "should be nearly gone by now: {}", vals[12]);
+}
+
+#[test]
+fn undo_invalidates_the_deposit_record() {
+    // The accumulator is a delta against pixels undo just replaced. If it
+    // survived, the next stroke would be measured against a stroke that no
+    // longer exists and deposit too little.
+    let n = 128;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+    drag(&mut e, 1.0, 0.3, 1);
+    let one = centre(&mut e);
+    e.save_history();
+    drag(&mut e, 1.0, 0.3, 2);
+    e.save_history();
+    assert!(e.undo());
+    assert!((centre(&mut e) - one).abs() < 1.5, "undo should step back to one pass");
+    // One more 0.3 deposit on top of that, i.e. ~51% not ~30%.
+    drag(&mut e, 1.0, 0.3, 3);
+    let after = centre(&mut e);
+    assert!(after > one * 1.5, "the next stroke must deposit in full, got {after}");
+}
+
+// ---------------------------------------------------------------------------
+// Eyedropper: Alt-click reads the flow strength under the cursor
+// ---------------------------------------------------------------------------
+
+#[test]
+fn eyedropper_reads_the_strength_it_is_sitting_on() {
+    // Paint a known strength, then read it back. The whole point is that the
+    // value you pick up is the ceiling you were painting towards.
+    let n = 128;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+    drag(&mut e, 0.5, 1.0, 1);
+    let picked = e.sample_strength(0.5, 0.5, "layer");
+    assert!((picked - 0.5).abs() < 0.03, "should read back ~0.5, got {picked}");
+
+    let id2 = e.add_layer(LayerKind::Paint);
+    e.active = id2.clone();
+    drag(&mut e, 0.25, 1.0, 2);
+    let picked2 = e.sample_strength(0.5, 0.5, "layer");
+    assert!((picked2 - 0.25).abs() < 0.03, "should read back ~0.25, got {picked2}");
+    // ...and it must not pick up the layer underneath.
+    assert!(picked2 < picked - 0.1, "sampling must stay on the active layer");
+}
+
+#[test]
+fn eyedropper_on_a_mask_falls_back_to_the_composite() {
+    // A wind/obstacle mask is opaque white — reading it as a flow vector would
+    // report full strength everywhere. Sampling has to fall back instead.
+    let n = 128;
+    let mut e = Engine::new(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+    drag(&mut e, 0.5, 1.0, 1);
+    e.composite();
+    let wind = e.add_layer(LayerKind::Wind);
+    e.active = wind;
+    let picked = e.sample_strength(0.5, 0.5, "layer");
+    assert!(picked < 0.9, "a mask must not read as full strength, got {picked}");
+}
+
+#[test]
+fn eyedropper_averages_a_patch_not_a_single_pixel() {
+    // 8-bit quantisation makes one pixel jittery; the slider would land on a
+    // value the user never painted. A 3x3 patch takes that out.
+    let n = 128;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+    drag(&mut e, 0.5, 1.0, 1);
+    let buf = e.layer(&id).unwrap().buf.clone();
+    let i = ((n / 2) * n + (n / 2)) * 4;
+    let single = ((128.0 - buf.data[i] as f32) / 127.0).abs();
+    let patch = e.sample_strength(0.5, 0.5, "layer");
+    assert!((patch - 0.5).abs() <= (single - 0.5).abs() + 0.001,
+        "the patch average must be at least as close as one pixel: {patch} vs {single}");
+}
+
+#[test]
+fn eyedropper_wraps_at_the_equirect_seam() {
+    let n = 128;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+    e.stroke(&[(0.0, 0.5), (0.03, 0.5)], 40.0, 0.8, 0.6, false, "content", 1, 1.0);
+    // u = 0 and u = 1 are the same column; both sides must read the same.
+    let left = e.sample_strength(0.0, 0.5, "layer");
+    let right = e.sample_strength(0.999, 0.5, "layer");
+    assert!((left - right).abs() < 0.05, "seam sides disagree: {left} vs {right}");
+    assert!(left > 0.1, "the stroke should be readable at the seam: {left}");
+}
