@@ -5,15 +5,25 @@
  * dispatches the returned action.
  */
 
-export type Tool = 'brush' | 'eraser' | 'magic_wand';
+export type Tool = 'brush' | 'eraser' | 'magic_wand' | 'eyedropper' | 'pan';
 export type ViewMode = '2d' | 'split' | '3d';
 export type BrushParam = 'size' | 'strength' | 'hardness';
+
+/**
+ * Tools that never put pixels down. The brush ring is hidden for these and the
+ * OS cursor comes back, otherwise an eyedropper with no visible pointer is
+ * unusable.
+ */
+export const NON_PAINTING_TOOLS: ReadonlySet<Tool> =
+  new Set<Tool>(['magic_wand', 'eyedropper', 'pan']);
 
 export type Action =
   | { type: 'none' }
   | { type: 'tool'; tool: Tool }
   | { type: 'view'; mode: ViewMode }
   | { type: 'toggle'; what: 'arrows' | 'anim' | 'reference' | 'flowmap' | 'help' }
+  /** Tab: collapse every panel so the canvas gets the whole window. */
+  | { type: 'togglePanels' }
   | { type: 'closeHelp' }
   | { type: 'resetView' }
   | { type: 'undo' }
@@ -80,10 +90,15 @@ export function resolveShortcut(e: KeyEventLike): Action {
   // ---- bare keys --------------------------------------------------------
   if (k === 'Escape') return { type: 'closeHelp' };
 
+  if (k === 'Tab') return { type: 'togglePanels' };
+
   switch (k) {
     case 'b': return { type: 'tool', tool: 'brush' };
     case 'e': return { type: 'tool', tool: 'eraser' };
     case 'm': return { type: 'tool', tool: 'magic_wand' };
+    // Photoshop's letters for these two, so the muscle memory carries over.
+    case 'i': return { type: 'tool', tool: 'eyedropper' };
+    case 'h': return { type: 'tool', tool: 'pan' };
 
     case '1': return { type: 'view', mode: '2d' };
     case '2': return { type: 'view', mode: 'split' };
@@ -114,12 +129,16 @@ export function resolveShortcut(e: KeyEventLike): Action {
 export function shouldPrevent(e: KeyEventLike): boolean {
   const mod = (e.ctrl ?? false) || (e.meta ?? false);
   if (mod) return true;
-  return e.key === ' ' || e.key === '?' || e.key === '/';
+  // Tab must be swallowed or the WebView walks focus into the toolbar instead
+  // of hiding the panels — and focus would then eat every later shortcut.
+  return e.key === ' ' || e.key === '?' || e.key === '/' || e.key === 'Tab';
 }
 
 /** Human-readable table shared by the in-app help panel and the docs. */
 export const SHORTCUT_HELP: Array<[string, string]> = [
   ['画笔 / 橡皮擦 / 魔棒', 'B / E / M'],
+  ['吸管 / 平移视图', 'I / H'],
+  ['隐藏 / 显示全部面板', 'Tab'],
   ['2D 绘制 / 分屏 / 3D 预览', '1 / 2 / 3'],
   ['显示流向箭头', 'A'],
   ['显示/隐藏天空贴图', 'R'],

@@ -2,17 +2,22 @@ import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef 
 import { api, nextStrokeId, decodeBase64, toImageData, Snapshot } from '../api';
 import { nextCursor, shouldClearOnLeave, type CursorUV } from '../cursor';
 import { brushGradient } from '../brush';
+import { NON_PAINTING_TOOLS, type Tool } from '../shortcuts';
 
 export interface PaintViewHandle {
   applySnapshot: (s: Snapshot) => void;
   getCanvas: () => HTMLCanvasElement | null;
   refreshArrows: () => void;
   resetView: () => void;
+  /** Current view scale, for the status bar. */
+  getZoom: () => number;
 }
 
 export interface PaintViewProps {
   size: number;
-  tool: 'brush' | 'eraser' | 'magic_wand';
+  tool: Tool;
+  /** Fired whenever the view scale changes, so the status bar can show it. */
+  onZoom?: (scale: number) => void;
   brushSize: number;
   brushHardness: number;
   /** How much of the remaining distance to `brushStrength` one stroke covers. */
@@ -86,6 +91,9 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
   const panning = useRef(false);
   const zooming = useRef(false);
   const picking = useRef(false);
+  // Alt gives you a *temporary* eyedropper; picking the tool makes it stick.
+  // Without this distinction, releasing Alt mid-drag would keep sampling.
+  const pickSticky = useRef(false);
   const panStart = useRef<{ x: number; y: number } | null>(null);
   const zoomStart = useRef<{ y: number; startScale: number } | null>(null);
   const rafId = useRef(0);
@@ -96,6 +104,7 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     if (!el) return;
     const t = transform.current;
     el.style.transform = `translate(${t.x}px, ${t.y}px) scale(${t.scale})`;
+    propsRef.current.onZoom?.(t.scale);
   }, []);
 
   const applySnapshot = useCallback((s: Snapshot) => {
@@ -175,6 +184,7 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
       transform.current = { x: 0, y: 0, scale: 1 };
       applyTransform();
     },
+    getZoom: () => transform.current.scale,
   }), [applySnapshot, refreshArrows, applyTransform]);
 
   // -- flush loop: one IPC per animation frame, not per pointer event -----
@@ -259,10 +269,19 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     if (e.button !== 0) return;
     const { u, v } = getUV(e);
     // Alt = eyedropper, whatever tool is selected. Temporary: it is a modifier,
-    // so releasing it returns to the tool on its own.
-    if (e.altKey) {
+    // so releasing it returns to the tool on its own. Selecting the eyedropper
+    // itself makes it stick for the whole drag.
+    if (e.altKey || p.tool === 'eyedropper') {
       picking.current = true;
+      pickSticky.current = p.tool === 'eyedropper';
       sample(u, v);
+      return;
+    }
+    // The hand tool is just the middle-button pan, moved onto the left button
+    // for people who do not have a middle button (trackpads, tablets).
+    if (p.tool === 'pan') {
+      panning.current = true;
+      panStart.current = { x: e.clientX - transform.current.x, y: e.clientY - transform.current.y };
       return;
     }
     if (p.tool === 'magic_wand') {
@@ -290,14 +309,14 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     const { u, v } = getUV(e);
     // Dragging with Alt keeps sampling, the way Photoshop's eyedropper does.
     if (picking.current) {
-      if (e.altKey) sample(u, v);
+      if (e.altKey || pickSticky.current) sample(u, v);
       return;
     }
     // Scrubbing a parameter: hold the ring still, only let it grow/shrink.
     const frozen = p.adjusting.current;
     p.cursorUV.current = nextCursor(frozen, { u, v }, p.cursorUV.current);
     const cur = cursorRef.current;
-    if (cur && p.tool !== 'magic_wand') {
+    if (cur && !NON_PAINTING_TOOLS.has(p.tool)) {
       if (u < -0.1 || u > 1.1 || v < -0.1 || v > 1.1) {
         cur.style.display = 'none';
       } else {
@@ -359,7 +378,7 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
   useEffect(() => {
     const cur = cursorRef.current;
     const p = propsRef.current;
-    if (cur && p.tool !== 'magic_wand') syncRingSize(cur, p.brushSize, p.size, p.brushHardness);
+    if (cur && !NON_PAINTING_TOOLS.has(p.tool)) syncRingSize(cur, p.brushSize, p.size, p.brushHardness);
   }, [props.brushSize, props.brushHardness, props.size, props.tool]);
 
   // Redraw arrows when density or visibility changes.
@@ -374,7 +393,7 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
           ref={canvasRef}
           width={props.size}
           height={props.size}
-          className={`paint-canvas ${props.tool === 'magic_wand' ? 'cursor-default' : 'cursor-none'}`}
+          className={`paint-canvas ${NON_PAINTING_TOOLS.has(props.tool) ? 'cursor-default' : 'cursor-none'}`}
         style={{ imageRendering: 'pixelated' }}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}

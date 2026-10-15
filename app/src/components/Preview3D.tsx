@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { createSkyMaterial, createArrowMaterial } from './FlowShader';
 import { nextCursor, shouldClearOnLeave, type CursorUV } from '../cursor';
+import { NON_PAINTING_TOOLS, type Tool } from '../shortcuts';
 
 /**
  * 3D preview. Port of the original R3F `PreviewScene` without React Three
@@ -96,7 +97,7 @@ export interface Preview3DProps {
   projection: Projection;
   polarAngle: number;
   paintEnabled: boolean;
-  tool: 'brush' | 'eraser' | 'magic_wand';
+  tool: Tool;
   onPaint?: (u: number, v: number, lu: number, lv: number) => void;
   onFill?: (u: number, v: number) => void;
   onPaintEnd?: () => void;
@@ -208,6 +209,7 @@ export const Preview3D = React.forwardRef<Preview3DHandle, Preview3DProps>((prop
 
   const paintingRef = useRef(false);
   const pickingRef = useRef(false);
+  const pickStickyRef = useRef(false);
   const lastUV = useRef<{ u: number; v: number } | null>(null);
 
   const activeMesh = () => {
@@ -388,11 +390,17 @@ export const Preview3D = React.forwardRef<Preview3DHandle, Preview3DProps>((prop
       const c = canvasUV(uv);
       // Alt = eyedropper, same as the 2D view. Alt is free here: the camera is
       // on the right and middle buttons.
-      if (e.altKey) {
+      if (e.altKey || p.tool === 'eyedropper') {
         pickingRef.current = true;
+        // Same sticky/temporary split as the 2D view: Alt releases on key-up,
+        // the tool stays for the whole drag.
+        pickStickyRef.current = p.tool === 'eyedropper';
         p.onPick?.(c.u, c.v);
         return;
       }
+      // The hand and eyedropper tools have no 3D painting meaning; the camera
+      // controls are already on the right and middle buttons.
+      if (p.tool === 'pan') return;
       paintingRef.current = true;
       ctx.dragging = true;
       lastUV.current = c;
@@ -413,7 +421,7 @@ export const Preview3D = React.forwardRef<Preview3DHandle, Preview3DProps>((prop
       const c = canvasUV(uv);
       // Dragging with Alt keeps sampling, the way Photoshop's eyedropper does.
       if (pickingRef.current) {
-        if (e.altKey) p.onPick?.(c.u, c.v);
+        if (e.altKey || pickStickyRef.current) p.onPick?.(c.u, c.v);
         return;
       }
       if (!paintingRef.current) return;
@@ -620,7 +628,7 @@ export const Preview3D = React.forwardRef<Preview3DHandle, Preview3DProps>((prop
   useEffect(() => {
     const ctx = threeRef.current;
     if (!ctx) return;
-    ctx.renderer.domElement.style.cursor = props.tool === 'magic_wand' ? 'default' : 'none';
+    ctx.renderer.domElement.style.cursor = NON_PAINTING_TOOLS.has(props.tool) ? 'default' : 'none';
   }, [props.tool]);
 
   // -- sky texture ---------------------------------------------------------

@@ -14,6 +14,7 @@ import { describe, it, expect } from 'vitest';
 import rawSrc from './App.tsx?raw';
 import rawPaintView from './components/PaintView.tsx?raw';
 import rawPreview3D from './components/Preview3D.tsx?raw';
+import rawShortcuts from './shortcuts?raw';
 // Vite's CSS plugin turns `styles.css?raw` into an empty string, so read
 // the source straight off disk. Everything else here uses `?raw`.
 import { readFileSync } from 'node:fs';
@@ -217,14 +218,26 @@ describe('eyedropper: Alt picks up the flow strength, like Photoshop', () => {
     expect(pan).toMatch(/if \(e\.button === 1\)/);
   });
 
-  it('samples on Alt in the 2D view', () => {
-    expect(paintView).toMatch(/if \(e\.altKey\) \{\s*picking\.current = true;\s*sample\(u, v\);/);
+  it('samples on Alt in the 2D view, and on the eyedropper tool itself', () => {
+    // Alt is the *temporary* eyedropper; picking the tool makes it stick for
+    // the whole drag, hence the sticky flag next to `picking`.
+    expect(paintView).toMatch(
+      /if \(e\.altKey \|\| p\.tool === 'eyedropper'\) \{\s*picking\.current = true;/);
+    expect(paintView).toMatch(/pickSticky\.current = p\.tool === 'eyedropper'/);
     // ...and keeps sampling while dragged, the way Photoshop's eyedropper does.
-    expect(paintView).toMatch(/if \(picking\.current\) \{\s*if \(e\.altKey\) sample\(u, v\);/);
+    expect(paintView).toMatch(/if \(picking\.current\) \{\s*if \(e\.altKey \|\| pickSticky\.current\) sample\(u, v\);/);
   });
 
   it('samples on Alt in the 3D view too', () => {
-    expect(preview3D).toMatch(/if \(e\.altKey\) \{\s*pickingRef\.current = true;\s*p\.onPick\?\.\(c\.u, c\.v\);/);
+    expect(preview3D).toMatch(
+      /if \(e\.altKey \|\| p\.tool === 'eyedropper'\) \{\s*pickingRef\.current = true;/);
+  });
+
+  it('has no brush ring for the tools that never paint', () => {
+    // An eyedropper or hand tool with the OS cursor hidden and a brush ring
+    // showing is unusable — you cannot see where you are pointing.
+    expect(paintView).toMatch(/NON_PAINTING_TOOLS\.has\(p\.tool\)/);
+    expect(preview3D).toMatch(/NON_PAINTING_TOOLS\.has\(props\.tool\)/);
   });
 
   it('reads from the layer you are on by default', () => {
@@ -319,5 +332,79 @@ describe('layer order: the stack has to be rearrangeable', () => {
     expect(src).toMatch(/const activeRow = layers\.findIndex/);
     expect(src).toMatch(/const canMoveUp = activeRow > 0/);
     expect(src).toMatch(/const canMoveDown = activeRow >= 0 && activeRow < layers\.length - 1/);
+  });
+});
+
+describe('Photoshop-style shell', () => {
+  /**
+   * The previous shell was "web admin console": one long sidebar down the left
+   * holding six unrelated sections, with the canvas shoved to the right and
+   * the brush parameters stranded in a footer bar. Four things matter about
+   * PS's layout and none of them are cosmetic:
+   *
+   *   1. the canvas is the centre, panels orbit it
+   *   2. panels fold, so you keep only what you are using
+   *   3. the options bar follows the selected tool
+   *   4. Tab hides everything at once
+   */
+  it('puts a vertical toolbox on the left', () => {
+    expect(src).toMatch(/<nav className="toolbox">/);
+    expect(src).toMatch(/TOOLS\.map\(\(t\) =>/);
+    // The glyph is the icon, the key is the shortcut hint in the corner.
+    expect(src).toMatch(/className="tool-glyph"/);
+    expect(src).toMatch(/className="tool-key"/);
+  });
+
+  it('lists every tool the shortcut resolver knows about', () => {
+    // A tool in the box with no key (or the reverse) is a silent dead end.
+    for (const t of ['brush', 'eraser', 'magic_wand', 'eyedropper', 'pan']) {
+      expect(src).toContain(`tool: '${t}'`);
+    }
+    // The union lives in shortcuts.ts, so check it there — otherwise the box
+    // and the resolver can drift apart and one tool silently does nothing.
+    expect(rawShortcuts).toMatch(
+      /export type Tool = 'brush' \| 'eraser' \| 'magic_wand' \| 'eyedropper' \| 'pan';/);
+  });
+
+  it('has an options bar that follows the selected tool', () => {
+    expect(src).toMatch(/<div className="optionsbar">/);
+    // Brush sliders live here now, not in the footer.
+    expect(src).toMatch(/\(tool === 'brush' \|\| tool === 'eraser'\)/);
+    // ...and the wand gets its own parameter instead of being appended.
+    expect(src).toMatch(/tool === 'magic_wand' && \(\s*<Slider label="容差"/);
+  });
+
+  it('makes the right-hand panels collapsible', () => {
+    expect(src).toMatch(/<aside className="panels">/);
+    expect(src).toMatch(/collapsed=\{!!collapsed\.layers\}/);
+    expect(src).toMatch(/onToggle=\{\(\) => togglePanel\('layers'\)\}/);
+    // The header has to be a real button or it is unreachable by keyboard.
+    expect(src).toMatch(/<button className="panel-head" onClick=\{onToggle\} aria-expanded=/);
+    expect(src).toMatch(/\{!collapsed && <div className="panel-body">/);
+  });
+
+  it('replaces the footer brush bar with a read-only status bar', () => {
+    expect(src).toMatch(/<footer className="statusbar">/);
+    expect(src).not.toMatch(/<footer className="brushbar">/);
+    // Read-only on purpose: a control here would steal focus from the canvas.
+    expect(src).toMatch(/<span className="st-item">\{state\.size\}²<\/span>/);
+    expect(src).toMatch(/缩放 \{Math\.round\(zoom2d \* 100\)\}%/);
+  });
+
+  it('lets the 2D / 3D divider be dragged', () => {
+    expect(src).toMatch(/className="splitter"/);
+    expect(src).toMatch(/onPointerDown=\{startSplit\}/);
+    expect(src).toMatch(/setSplitRatio\(clamp\(\(e\.clientX - r\.left\) \/ r\.width, 0\.15, 0\.85\)\)/);
+    // Clamped: an accidental 0 would collapse a pane to nothing with no way
+    // to grab the handle back.
+    expect(src).toMatch(/paneFlex = \(which: '2d' \| '3d'\)/);
+  });
+
+  it('hides the whole shell on Tab', () => {
+    expect(src).toMatch(/case 'togglePanels': setShellHidden\(\(v\) => !v\); break;/);
+    // Toolbox, panels and options bar all go; the canvas keeps everything.
+    expect(src).toMatch(/\{!shellHidden && \(\s*<nav className="toolbox">/);
+    expect(src).toMatch(/\{!shellHidden && \(\s*<aside className="panels">/);
+    expect(src).toMatch(/\{!shellHidden && \(\s*<div className="optionsbar">/);
   });
 });

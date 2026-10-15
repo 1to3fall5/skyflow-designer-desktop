@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveShortcut, isTextEntry, shouldPrevent, KeyEventLike } from './shortcuts';
+import { resolveShortcut, isTextEntry, shouldPrevent, NON_PAINTING_TOOLS, KeyEventLike } from './shortcuts';
 
 const key = (k: string, extra: Partial<KeyEventLike> = {}): KeyEventLike => ({ key: k, ...extra });
 
@@ -133,9 +133,36 @@ describe('brush sizing', () => {
 
 describe('unhandled keys', () => {
   it('returns none for anything else', () => {
-    for (const k of ['q', 'w', 'x', '9', 'F1', 'ArrowUp', 'Tab', 'Enter']) {
+    for (const k of ['q', 'w', 'x', '9', 'F1', 'ArrowUp', 'Enter']) {
       expect(resolveShortcut(key(k))).toEqual({ type: 'none' });
     }
+  });
+});
+
+describe('Tab collapses every panel', () => {
+  it('maps Tab to the panel toggle', () => {
+    expect(resolveShortcut(key('Tab'))).toEqual({ type: 'togglePanels' });
+  });
+
+  it('is swallowed, or focus walks into the toolbar instead', () => {
+    // Worse than not working: focus lands on a button and every later
+    // shortcut gets eaten by it.
+    expect(shouldPrevent(key('Tab'))).toBe(true);
+  });
+});
+
+describe('eyedropper and hand tool', () => {
+  it('uses Photoshop letters I and H', () => {
+    expect(resolveShortcut(key('i'))).toEqual({ type: 'tool', tool: 'eyedropper' });
+    expect(resolveShortcut(key('h'))).toEqual({ type: 'tool', tool: 'pan' });
+  });
+
+  it('treats them as non-painting, like the magic wand', () => {
+    expect(NON_PAINTING_TOOLS.has('eyedropper')).toBe(true);
+    expect(NON_PAINTING_TOOLS.has('pan')).toBe(true);
+    expect(NON_PAINTING_TOOLS.has('magic_wand')).toBe(true);
+    expect(NON_PAINTING_TOOLS.has('brush')).toBe(false);
+    expect(NON_PAINTING_TOOLS.has('eraser')).toBe(false);
   });
 });
 

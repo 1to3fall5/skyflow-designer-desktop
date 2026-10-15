@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { open, save, message } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { api, nextStrokeId, AppState, LayerInfo, LayerKind, Snapshot } from './api';
-import { resolveShortcut, shouldPrevent, SHORTCUT_HELP, type BrushParam } from './shortcuts';
+import { resolveShortcut, shouldPrevent, SHORTCUT_HELP, type BrushParam, type Tool } from './shortcuts';
 import type { CursorUV } from './cursor';
 import PaintView, { PaintViewHandle } from './components/PaintView';
 import Preview3D, { Preview3DHandle } from './components/Preview3D';
@@ -10,7 +10,19 @@ import Preview3D, { Preview3DHandle } from './components/Preview3D';
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
 type ViewMode = '2d' | 'split' | '3d';
-type Tool = 'brush' | 'eraser' | 'magic_wand';
+
+/** Toolbox entries. `key` is also the shortcut, so the two cannot drift. */
+const TOOLS: Array<{ tool: Tool; glyph: string; label: string; key: string }> = [
+  { tool: 'brush', glyph: '✎', label: '画笔', key: 'B' },
+  { tool: 'eraser', glyph: '⌫', label: '橡皮擦', key: 'E' },
+  { tool: 'magic_wand', glyph: '✦', label: '魔棒', key: 'M' },
+  { tool: 'eyedropper', glyph: '⌖', label: '吸管', key: 'I' },
+  { tool: 'pan', glyph: '✥', label: '平移', key: 'H' },
+];
+
+/** Right-hand panel ids, in display order. */
+const PANEL_IDS = ['layers', 'props', 'projection', 'source', 'export', 'recent'] as const;
+type PanelId = typeof PANEL_IDS[number];
 
 const KIND_META: Record<LayerKind, { label: string; color: string }> = {
   paint: { label: '流向', color: '#10b981' },
@@ -56,6 +68,17 @@ export default function App() {
   const [dragOver, setDragOver] = useState<number | null>(null);
   /** Backend-encoded PNG of the reference image (TGA-safe display path). */
   const [refSrc, setRefSrc] = useState<string | null>(null);
+
+  // ---- shell layout (Photoshop-style) ----
+  /** Which right-hand panels are folded. Nothing starts folded. */
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  /** Tab: hide the toolbox, the panels and the options bar. PS calls this
+   *  "collapse all panels" and it is the single most useful key when painting. */
+  const [shellHidden, setShellHidden] = useState(false);
+  /** 2D pane share of the workspace in split view. */
+  const [splitRatio, setSplitRatio] = useState(0.5);
+  const [zoom2d, setZoom2d] = useState(1);
+  const togglePanel = (id: PanelId) => setCollapsed((c) => ({ ...c, [id]: !c[id] }));
 
   const paintRef = useRef<PaintViewHandle>(null);
   const previewRef = useRef<Preview3DHandle>(null);
@@ -278,6 +301,7 @@ export default function App() {
           else setShowShortcuts((v) => !v);
           break;
         case 'closeHelp': setShowShortcuts(false); break;
+        case 'togglePanels': setShellHidden((v) => !v); break;
         case 'resetView': paintRef.current?.resetView(); break;
         case 'undo': structural(api.undo()); break;
         case 'redo': structural(api.redo()); break;
@@ -375,6 +399,30 @@ export default function App() {
 
   const skyUrl = refSrc;
   const isAdj = activeLayer ? activeLayer.kind !== 'paint' : false;
+
+  // ---- workspace split ----
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const draggingSplit = useRef(false);
+  const startSplit = (e: React.PointerEvent) => {
+    draggingSplit.current = true;
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+  };
+  const moveSplit = (e: React.PointerEvent) => {
+    if (!draggingSplit.current) return;
+    const el = workspaceRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setSplitRatio(clamp((e.clientX - r.left) / r.width, 0.15, 0.85));
+  };
+  const endSplit = (e: React.PointerEvent) => {
+    draggingSplit.current = false;
+    (e.target as Element).releasePointerCapture?.(e.pointerId);
+  };
+  /** `flex` shorthand for a pane. Only meaningful in split view. */
+  const paneFlex = (which: '2d' | '3d') =>
+    viewMode === 'split'
+      ? `${which === '2d' ? splitRatio : 1 - splitRatio} 1 0`
+      : '1 1 0';
   // Adjustment layers (wind / obstacle) have no paintable content of their own —
   // their pixels come from parameters. Painting one always edits its mask, so
   // this is forced rather than left to a UI toggle that can silently no-op.
@@ -417,173 +465,65 @@ export default function App() {
         </div>
       </header>
 
+      {!shellHidden && (
+        <div className="optionsbar">
+          <span className="ob-tool">{TOOLS.find((t) => t.tool === tool)?.label ?? tool}</span>
+          <span className="ob-sep" />
+
+          {(tool === 'brush' || tool === 'eraser') && (
+            <>
+              <Slider label="大小" value={brushSize} min={1} max={200} step={1} onChange={setBrushSize} display={String(brushSize | 0)} />
+              <Slider label="强度" value={brushStrength} min={0.01} max={1} step={0.01} onChange={setBrushStrength}
+                title="想画到的流动强度上限（类似 Photoshop 的前景色）。反复涂抹只会趋近这个值，不会越涂越强。" />
+              <Slider label="流量" value={brushFlow} min={0.01} max={1} step={0.01} onChange={setBrushFlow}
+                title="每一笔走完「到强度上限的剩余距离」的比例（类似 Photoshop 的流量）。流量 1 一笔到位；流量 0.25 要涂七八笔才接近上限，中间会把下层风向平滑地掰过来。" />
+              <Slider label="硬度" value={brushHardness} min={0} max={1} step={0.01} onChange={setBrushHardness} />
+            </>
+          )}
+
+          {tool === 'magic_wand' && (
+            <Slider label="容差" value={magicThreshold} min={1} max={100} step={1} onChange={setMagicThreshold} display={String(magicThreshold)} />
+          )}
+
+          {tool === 'eyedropper' && (
+            <span className="ob-hint">在 2D 或 3D 视图中点击，把该处的流动强度设为笔刷强度</span>
+          )}
+
+          {tool === 'pan' && (
+            <span className="ob-hint">拖动平移 2D 视图（3D 视角用右键 / 中键）</span>
+          )}
+
+          <div className="spacer" />
+
+          <div className="slider" title="吸管取样范围，和 Photoshop 的取样选项一致。">
+            <span>取样</span>
+            <select value={sampleSource}
+              onChange={(e) => setSampleSource(e.target.value as 'layer' | 'composite')}>
+              <option value="layer">当前图层</option>
+              <option value="composite">合成结果</option>
+            </select>
+          </div>
+        </div>
+      )}
+
       <main className="body">
-        <aside className="sidebar">
-          {/* ---- image source ---- */}
-          <Section title="图片源">
-            <button className="dropzone" onClick={() => importImage()}>
-              <span>点击选择天空贴图</span>
-              <small>等距柱状投影 2:1 / 极坐标 / 平面</small>
-            </button>
-            {state.reference_path && (
-              <div className="thumb-row">
-                {refSrc && <img src={refSrc} alt="" className="thumb" />}
-                <div className="thumb-meta">
-                  <div className="ellipsis">{state.reference_path.split(/[\\/]/).pop()}</div>
-                  <button className="link" onClick={async () => {
-                    setState(await api.clearReference());
-                    setRefSrc(null);
-                  }}>移除</button>
-                </div>
-              </div>
-            )}
-            <div className="seg">
-              {([['equirectangular', '球面'], ['polar', '极坐标'], ['planar', '平面']] as const).map(([k, label]) => (
-                <button key={k} className={state.projection === k ? 'on' : ''}
-                  onClick={async () => applyUpdate(await api.setProjection(k, state.polar_angle))}>
-                  {label}
-                </button>
-              ))}
-            </div>
-            {state.projection === 'polar' && (
-              <Row label="张角" value={`${state.polar_angle | 0}°`}>
-                <input type="range" min={45} max={180} value={state.polar_angle}
-                  onChange={async (e) => {
-                    applyUpdate(await api.setProjection('polar', Number(e.target.value)));
-                  }} />
-              </Row>
-            )}
-          </Section>
+        {!shellHidden && (
+          <nav className="toolbox">
+            {TOOLS.map((t) => (
+              <button
+                key={t.tool}
+                className={`tool ${tool === t.tool ? 'on' : ''}`}
+                title={`${t.label}（${t.key}）`}
+                onClick={() => setTool(t.tool)}
+              >
+                <span className="tool-glyph">{t.glyph}</span>
+                <span className="tool-key">{t.key}</span>
+              </button>
+            ))}
+          </nav>
+        )}
 
-          {/* ---- layer properties ---- */}
-          {activeLayer && (
-            <Section title={`${KIND_META[activeLayer.kind].label}属性`}>
-              {activeLayer.kind === 'wind' && (
-                <>
-                  <Row label="方向" value={`${activeLayer.direction | 0}°`}>
-                    <input type="range" min={0} max={360} value={activeLayer.direction}
-                      onChange={(e) => updateLayer(activeLayer.id, { direction: Number(e.target.value) })} />
-                  </Row>
-                  <Row label="强度" value={`${Math.round(activeLayer.strength * 100)}%`}>
-                    <input type="range" min={0} max={1} step={0.01} value={activeLayer.strength}
-                      onChange={(e) => updateLayer(activeLayer.id, { strength: Number(e.target.value) })} />
-                  </Row>
-                </>
-              )}
-              {activeLayer.kind === 'obstacle' && (
-                <>
-                  <Row label="扰动">
-                    <button className={activeLayer.disturbance_enabled ? 'toggle on' : 'toggle'}
-                      onClick={() => updateLayer(activeLayer.id, { disturbance_enabled: !activeLayer.disturbance_enabled })}>
-                      {activeLayer.disturbance_enabled ? '已启用' : '已关闭'}
-                    </button>
-                  </Row>
-                  {activeLayer.disturbance_enabled && (
-                    <Row label="范围" value={`${Math.round(activeLayer.disturbance * 100)}%`}>
-                      <input type="range" min={0} max={1} step={0.05} value={activeLayer.disturbance}
-                        onChange={(e) => updateLayer(activeLayer.id, { disturbance: Number(e.target.value) })} />
-                    </Row>
-                  )}
-                </>
-              )}
-              <Row label="模糊" value={String(activeLayer.blur | 0)}>
-                <input type="range" min={0} max={64} value={activeLayer.blur}
-                  onChange={(e) => updateLayer(activeLayer.id, { blur: Number(e.target.value) })} />
-              </Row>
-              <Row label="不透明度" value={`${Math.round(activeLayer.opacity * 100)}%`}>
-                <input type="range" min={0} max={1} step={0.01} value={activeLayer.opacity}
-                  onChange={(e) => updateLayer(activeLayer.id, { opacity: Number(e.target.value) })} />
-              </Row>
-            </Section>
-          )}
-
-          {/* ---- layers ---- */}
-          <Section title="图层" grow>
-            <div className="layer-tools">
-              <button onClick={() => structural(api.addLayer('paint'))} title="新建流向图层">＋ 流向</button>
-              <button onClick={() => structural(api.addLayer('wind'))} title="新建风向图层">＋ 风向</button>
-              <button onClick={() => structural(api.addLayer('obstacle'))} title="新建障碍图层">＋ 障碍</button>
-              <button className="danger"
-                onClick={() => activeLayer && state.layers.length > 1 && structural(api.removeLayer(activeLayer.id))}
-                title="删除图层">－</button>
-              {/* Keyboard-reachable reordering. Drag and drop works too, but it
-                  is undiscoverable and the row is mostly child elements. */}
-              <button className="nudge" disabled={!canMoveUp} onClick={() => moveActive(-1)}
-                title="上移一层（越靠上越晚合成，即覆盖下方图层）">▲</button>
-              <button className="nudge" disabled={!canMoveDown} onClick={() => moveActive(1)}
-                title="下移一层（越靠下越早合成，即被上方图层覆盖）">▼</button>
-            </div>
-            <div className="layer-list">
-              {layers.map((l, i) => {
-                const meta = KIND_META[l.kind];
-                const active = l.id === state.active;
-                return (
-                  <div
-                    key={l.id}
-                    draggable
-                    onDragStart={(e) => {
-                      e.dataTransfer.setData('text/plain', String(i));
-                      e.dataTransfer.effectAllowed = 'move';
-                    }}
-                    onDragOver={(e) => { e.preventDefault(); setDragOver(i); }}
-                    onDragLeave={() => setDragOver((d) => (d === i ? null : d))}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      setDragOver(null);
-                      const from = Number(e.dataTransfer.getData('text/plain'));
-                      if (from !== i) structural(api.reorder(from, i));
-                    }}
-                    onDragEnd={() => setDragOver(null)}
-                    className={`layer ${active ? 'active' : ''} ${dragOver === i ? 'drop-target' : ''}`}
-                    style={active ? { borderColor: meta.color, boxShadow: `0 0 0 1px ${meta.color}55` } : undefined}
-                    onClick={async () => { setState(await api.setActive(l.id)); }}
-                  >
-                    <span className="grip" title="拖动调整图层顺序">⋮⋮</span>
-                    <span className="badge" style={{ background: `${meta.color}22`, color: meta.color }}>{meta.label}</span>
-                    <span className="ellipsis name">{l.name}</span>
-                    {l.kind !== 'paint' && active && (
-                      // Not a toggle: painting an adjustment layer always edits
-                      // its mask. A "参数/遮罩" switch here could silently eat
-                      // brush strokes, which is exactly the bug it caused.
-                      <span className="chip hint" title="绘制即编辑遮罩">遮罩</span>
-                    )}
-                    <button className="eye" onClick={(e) => { e.stopPropagation(); updateLayer(l.id, { visible: !l.visible }); }}>
-                      {l.visible ? '◉' : '○'}
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          </Section>
-
-          {/* ---- export ---- */}
-          <Section title="导出">
-            <Row label="分辨率">
-              <select value={exportRes} onChange={(e) => setExportRes(Number(e.target.value))}>
-                {RESOLUTIONS.map((r) => <option key={r} value={r}>{r}²</option>)}
-              </select>
-            </Row>
-            <div className="checks">
-              <label><input type="checkbox" checked={invertX} onChange={(e) => setInvertX(e.target.checked)} /> 反转 R</label>
-              <label><input type="checkbox" checked={invertY} onChange={(e) => setInvertY(e.target.checked)} /> 反转 G</label>
-            </div>
-            <button className="primary wide" onClick={doExport}>导出 Flowmap</button>
-          </Section>
-
-          {recent.length > 0 && (
-            <Section title="最近打开">
-              <div className="recent">
-                {recent.map((p) => (
-                  <button key={p} className="link ellipsis" title={p} onClick={() => doOpen(p)}>
-                    {p.split(/[\\/]/).pop()}
-                  </button>
-                ))}
-              </div>
-            </Section>
-          )}
-        </aside>
-
-        <div className="workspace">
+        <div className="workspace" ref={workspaceRef}>
           {/* ---- floating viewport toolbar ---- */}
           <div className="float-bar">
             <IconBtn on={showReference} onClick={() => setShowReference((v) => !v)} label="显示贴图">▤</IconBtn>
@@ -608,7 +548,7 @@ export default function App() {
             )}
           </div>
 
-          <div className={`pane ${viewMode === '3d' ? 'hidden' : ''}`}>
+          <div className={`pane ${viewMode === '3d' ? 'hidden' : ''}`} style={{ flex: paneFlex('2d') }}>
             <PaintView
               ref={paintRef}
               size={state.size}
@@ -619,6 +559,7 @@ export default function App() {
               brushFlow={brushFlow}
               sampleSource={sampleSource}
               onPickStrength={setBrushStrength}
+              onZoom={setZoom2d}
               editTarget={effTarget}
               magicThreshold={magicThreshold}
               showReference={showReference}
@@ -634,7 +575,20 @@ export default function App() {
             />
           </div>
 
-          <div className={`pane ${viewMode === '2d' ? 'hidden' : ''}`}>
+          {viewMode === 'split' && (
+            <div
+              className="splitter"
+              title="拖动调整 2D / 3D 的占比"
+              onPointerDown={startSplit}
+              onPointerMove={moveSplit}
+              onPointerUp={endSplit}
+              onPointerCancel={endSplit}
+            >
+              <span className="splitter-grip" />
+            </div>
+          )}
+
+          <div className={`pane ${viewMode === '2d' ? 'hidden' : ''}`} style={{ flex: paneFlex('3d') }}>
             <Preview3D
               ref={previewRef}
               flowCanvasRef={flowCanvasRef}
@@ -678,40 +632,192 @@ export default function App() {
             />
           </div>
         </div>
+
+        {!shellHidden && (
+          <aside className="panels">
+            <Panel id="layers" title="图层" grow
+              collapsed={!!collapsed.layers} onToggle={() => togglePanel('layers')}>
+              <div className="layer-tools">
+                <button onClick={() => structural(api.addLayer('paint'))} title="新建流向图层">＋ 流向</button>
+                <button onClick={() => structural(api.addLayer('wind'))} title="新建风向图层">＋ 风向</button>
+                <button onClick={() => structural(api.addLayer('obstacle'))} title="新建障碍图层">＋ 障碍</button>
+                <button className="danger"
+                  onClick={() => activeLayer && state.layers.length > 1 && structural(api.removeLayer(activeLayer.id))}
+                  title="删除图层">－</button>
+                {/* Keyboard-reachable reordering. Drag and drop works too, but it
+                    is undiscoverable and the row is mostly child elements. */}
+                <button className="nudge" disabled={!canMoveUp} onClick={() => moveActive(-1)}
+                  title="上移一层（越靠上越晚合成，即覆盖下方图层）">▲</button>
+                <button className="nudge" disabled={!canMoveDown} onClick={() => moveActive(1)}
+                  title="下移一层（越靠下越早合成，即被上方图层覆盖）">▼</button>
+              </div>
+              <div className="layer-list">
+                {layers.map((l, i) => {
+                  const meta = KIND_META[l.kind];
+                  const active = l.id === state.active;
+                  return (
+                    <div
+                      key={l.id}
+                      draggable
+                      onDragStart={(e) => {
+                        e.dataTransfer.setData('text/plain', String(i));
+                        e.dataTransfer.effectAllowed = 'move';
+                      }}
+                      onDragOver={(e) => { e.preventDefault(); setDragOver(i); }}
+                      onDragLeave={() => setDragOver((d) => (d === i ? null : d))}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        setDragOver(null);
+                        const from = Number(e.dataTransfer.getData('text/plain'));
+                        if (from !== i) structural(api.reorder(from, i));
+                      }}
+                      onDragEnd={() => setDragOver(null)}
+                      className={`layer ${active ? 'active' : ''} ${dragOver === i ? 'drop-target' : ''}`}
+                      style={active ? { borderColor: meta.color, boxShadow: `0 0 0 1px ${meta.color}55` } : undefined}
+                      onClick={async () => { setState(await api.setActive(l.id)); }}
+                    >
+                      <span className="grip" title="拖动调整图层顺序">⋮⋮</span>
+                      <span className="badge" style={{ background: `${meta.color}22`, color: meta.color }}>{meta.label}</span>
+                      <span className="ellipsis name">{l.name}</span>
+                      {l.kind !== 'paint' && active && (
+                        // Not a toggle: painting an adjustment layer always edits
+                        // its mask. A "参数/遮罩" switch here could silently eat
+                        // brush strokes, which is exactly the bug it caused.
+                        <span className="chip hint" title="绘制即编辑遮罩">遮罩</span>
+                      )}
+                      <button className="eye" onClick={(e) => { e.stopPropagation(); updateLayer(l.id, { visible: !l.visible }); }}>
+                        {l.visible ? '◉' : '○'}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </Panel>
+
+            {activeLayer && (
+              <Panel id="props" title={`${KIND_META[activeLayer.kind].label}属性`}
+                collapsed={!!collapsed.props} onToggle={() => togglePanel('props')}>
+                {activeLayer.kind === 'wind' && (
+                  <>
+                    <Row label="方向" value={`${activeLayer.direction | 0}°`}>
+                      <input type="range" min={0} max={360} value={activeLayer.direction}
+                        onChange={(e) => updateLayer(activeLayer.id, { direction: Number(e.target.value) })} />
+                    </Row>
+                    <Row label="强度" value={`${Math.round(activeLayer.strength * 100)}%`}>
+                      <input type="range" min={0} max={1} step={0.01} value={activeLayer.strength}
+                        onChange={(e) => updateLayer(activeLayer.id, { strength: Number(e.target.value) })} />
+                    </Row>
+                  </>
+                )}
+                {activeLayer.kind === 'obstacle' && (
+                  <>
+                    <Row label="扰动">
+                      <button className={activeLayer.disturbance_enabled ? 'toggle on' : 'toggle'}
+                        onClick={() => updateLayer(activeLayer.id, { disturbance_enabled: !activeLayer.disturbance_enabled })}>
+                        {activeLayer.disturbance_enabled ? '已启用' : '已关闭'}
+                      </button>
+                    </Row>
+                    {activeLayer.disturbance_enabled && (
+                      <Row label="范围" value={`${Math.round(activeLayer.disturbance * 100)}%`}>
+                        <input type="range" min={0} max={1} step={0.05} value={activeLayer.disturbance}
+                          onChange={(e) => updateLayer(activeLayer.id, { disturbance: Number(e.target.value) })} />
+                      </Row>
+                    )}
+                  </>
+                )}
+                <Row label="模糊" value={String(activeLayer.blur | 0)}>
+                  <input type="range" min={0} max={64} value={activeLayer.blur}
+                    onChange={(e) => updateLayer(activeLayer.id, { blur: Number(e.target.value) })} />
+                </Row>
+                <Row label="不透明度" value={`${Math.round(activeLayer.opacity * 100)}%`}>
+                  <input type="range" min={0} max={1} step={0.01} value={activeLayer.opacity}
+                    onChange={(e) => updateLayer(activeLayer.id, { opacity: Number(e.target.value) })} />
+                </Row>
+              </Panel>
+            )}
+
+            <Panel id="projection" title="投影"
+              collapsed={!!collapsed.projection} onToggle={() => togglePanel('projection')}>
+              <div className="seg">
+                {([['equirectangular', '球面'], ['polar', '极坐标'], ['planar', '平面']] as const).map(([k, label]) => (
+                  <button key={k} className={state.projection === k ? 'on' : ''}
+                    onClick={async () => applyUpdate(await api.setProjection(k, state.polar_angle))}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {state.projection === 'polar' && (
+                <Row label="张角" value={`${state.polar_angle | 0}°`}>
+                  <input type="range" min={45} max={180} value={state.polar_angle}
+                    onChange={async (e) => {
+                      applyUpdate(await api.setProjection('polar', Number(e.target.value)));
+                    }} />
+                </Row>
+              )}
+            </Panel>
+
+            <Panel id="source" title="图片源"
+              collapsed={!!collapsed.source} onToggle={() => togglePanel('source')}>
+              <button className="dropzone" onClick={() => importImage()}>
+                <span>点击选择天空贴图</span>
+                <small>等距柱状投影 2:1 / 极坐标 / 平面</small>
+              </button>
+              {state.reference_path && (
+                <div className="thumb-row">
+                  {refSrc && <img src={refSrc} alt="" className="thumb" />}
+                  <div className="thumb-meta">
+                    <div className="ellipsis">{state.reference_path.split(/[\\/]/).pop()}</div>
+                    <button className="link" onClick={async () => {
+                      setState(await api.clearReference());
+                      setRefSrc(null);
+                    }}>移除</button>
+                  </div>
+                </div>
+              )}
+            </Panel>
+
+            <Panel id="export" title="导出"
+              collapsed={!!collapsed.export} onToggle={() => togglePanel('export')}>
+              <Row label="分辨率">
+                <select value={exportRes} onChange={(e) => setExportRes(Number(e.target.value))}>
+                  {RESOLUTIONS.map((r) => <option key={r} value={r}>{r}²</option>)}
+                </select>
+              </Row>
+              <div className="checks">
+                <label><input type="checkbox" checked={invertX} onChange={(e) => setInvertX(e.target.checked)} /> 反转 R</label>
+                <label><input type="checkbox" checked={invertY} onChange={(e) => setInvertY(e.target.checked)} /> 反转 G</label>
+              </div>
+              <button className="primary wide" onClick={doExport}>导出 Flowmap</button>
+            </Panel>
+
+            {recent.length > 0 && (
+              <Panel id="recent" title="最近打开"
+                collapsed={!!collapsed.recent} onToggle={() => togglePanel('recent')}>
+                <div className="recent">
+                  {recent.map((p) => (
+                    <button key={p} className="link ellipsis" title={p} onClick={() => doOpen(p)}>
+                      {p.split(/[\\/]/).pop()}
+                    </button>
+                  ))}
+                </div>
+              </Panel>
+            )}
+          </aside>
+        )}
       </main>
 
-      <footer className="brushbar">
-        <div className="seg">
-          <button className={tool === 'brush' ? 'on' : ''} onClick={() => setTool('brush')}>画笔</button>
-          <button className={tool === 'eraser' ? 'on' : ''} onClick={() => setTool('eraser')}>橡皮擦</button>
-          <button className={tool === 'magic_wand' ? 'on' : ''} onClick={() => setTool('magic_wand')}>魔棒</button>
-        </div>
-        <Slider label="大小" value={brushSize} min={1} max={200} step={1} onChange={setBrushSize} display={String(brushSize | 0)} />
-        <Slider label="强度" value={brushStrength} min={0.01} max={1} step={0.01} onChange={setBrushStrength}
-          title="想画到的流动强度上限（类似 Photoshop 的前景色）。反复涂抹只会趋近这个值，不会越涂越强。" />
-        <Slider label="流量" value={brushFlow} min={0.01} max={1} step={0.01} onChange={setBrushFlow}
-          title="每一笔走完「到强度上限的剩余距离」的比例（类似 Photoshop 的流量）。流量 1 一笔到位；流量 0.25 要涂七八笔才接近上限，中间会把下层风向平滑地掰过来。" />
-        <Slider label="硬度" value={brushHardness} min={0} max={1} step={0.01} onChange={setBrushHardness} />
-        <div className="slider" title="按住 Alt 吸管吸取强度时的取样范围，和 Photoshop 的取样选项一致。">
-          <span>取样</span>
-          <select value={sampleSource}
-            onChange={(e) => setSampleSource(e.target.value as 'layer' | 'composite')}>
-            <option value="layer">当前图层</option>
-            <option value="composite">合成结果</option>
-          </select>
-        </div>
-        {tool === 'magic_wand' && (
-          <Slider label="容差" value={magicThreshold} min={1} max={100} step={1} onChange={setMagicThreshold} display={String(magicThreshold)} />
-        )}
+      <footer className="statusbar">
+        <span className="st-item">{state.size}²</span>
+        <span className="st-item">缩放 {Math.round(zoom2d * 100)}%</span>
+        <span className="st-item" ref={perfRef} title="单次全图层合成耗时">合成 —</span>
         <div className="spacer" />
         {activeLayer && (
-          <span className="target-chip" style={{ color: KIND_META[activeLayer.kind].color }}>
+          <span className="st-item target-chip" style={{ color: KIND_META[activeLayer.kind].color }}>
             {isAdj ? `${activeLayer.name} · 遮罩` : activeLayer.name}
           </span>
         )}
-        <span className="res-chip">{state.size}²</span>
-        <span className="perf-chip" ref={perfRef} title="单次全图层合成耗时">合成 —</span>
-        {busy && <span className="busy">处理中…</span>}
+        {busy && <span className="st-item busy">处理中…</span>}
+        {shellHidden && <span className="st-item dim">Tab 恢复面板</span>}
       </footer>
 
       {showShortcuts && (
@@ -726,11 +832,27 @@ export default function App() {
 
 // ---------------------------------------------------------------------------
 
-function Section({ title, children, grow }: { title: string; children: React.ReactNode; grow?: boolean }) {
+/**
+ * A right-hand panel. Photoshop's panels fold to a title bar only, which is
+ * what makes the panel column usable: you keep the layers open and shut
+ * everything you are not touching.
+ *
+ * The header is a real button so it is keyboard reachable; `data-panel` is
+ * there for the tests to latch onto.
+ */
+function Panel({ id, title, children, collapsed, onToggle, grow }:
+  { id: string; title: string; children: React.ReactNode; collapsed: boolean;
+    onToggle: () => void; grow?: boolean }) {
   return (
-    <section className={`sec ${grow ? 'grow' : ''}`}>
-      <h3>{title}</h3>
-      {children}
+    <section
+      className={`panel ${collapsed ? 'collapsed' : ''} ${grow ? 'grow' : ''}`}
+      data-panel={id}
+    >
+      <button className="panel-head" onClick={onToggle} aria-expanded={!collapsed} title={title}>
+        <span className="chev">{collapsed ? '▸' : '▾'}</span>
+        <span className="ellipsis">{title}</span>
+      </button>
+      {!collapsed && <div className="panel-body">{children}</div>}
     </section>
   );
 }

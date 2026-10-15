@@ -146,37 +146,96 @@ select {
 
 .body { flex: 1; display: flex; min-height: 0; }
 
-.sidebar {
-  width: 296px;
-  flex: 0 0 296px;
+/* ---------- options bar: follows the selected tool ---------- */
+.optionsbar {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 12px;
+  padding: 7px 14px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--line);
+}
+.optionsbar .slider input[type=range] { width: 110px; }
+.optionsbar .slider select {
+  font: inherit; font-size: 10px; color: var(--fg-dim);
+  background: var(--bg-2); border: 1px solid var(--line);
+  border-radius: 4px; padding: 1px 3px;
+}
+.ob-tool {
+  font-size: 11px; font-weight: 700; color: var(--fg);
+  background: var(--bg-3); border: 1px solid var(--line);
+  border-radius: 5px; padding: 2px 8px; flex: 0 0 auto;
+}
+.ob-sep { width: 1px; height: 18px; background: var(--line); flex: 0 0 auto; }
+.ob-hint { font-size: 11px; color: var(--fg-mute); }
+
+/* ---------- toolbox ---------- */
+.toolbox {
+  flex: 0 0 48px;
   background: var(--bg-1);
   border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; align-items: center;
+  gap: 3px;
+  padding: 8px 0;
+}
+.toolbox .tool {
+  position: relative;
+  width: 34px; height: 34px;
+  display: flex; align-items: center; justify-content: center;
+  background: none; border: 1px solid transparent; border-radius: 7px;
+  padding: 0;
+}
+.toolbox .tool:hover { background: var(--bg-3); }
+.toolbox .tool.on { background: var(--bg-3); border-color: var(--accent); }
+.tool-glyph { font-size: 15px; line-height: 1; color: var(--fg-dim); }
+.toolbox .tool.on .tool-glyph { color: #fff; }
+/* The shortcut letter sits in the corner, the way PS marks its tools. */
+.tool-key {
+  position: absolute; right: 2px; bottom: 1px;
+  font-size: 9px; color: var(--fg-mute); font-weight: 700;
+}
+.toolbox .tool.on .tool-key { color: var(--accent-hi); }
+
+/* ---------- right-hand panels ---------- */
+.panels {
+  width: 272px;
+  flex: 0 0 272px;
+  background: var(--bg-1);
+  border-left: 1px solid var(--line);
   overflow-y: auto;
-  padding: 12px;
+  padding: 8px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 6px;
 }
-.sidebar::-webkit-scrollbar { width: 8px; }
-.sidebar::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+.panels::-webkit-scrollbar { width: 8px; }
+.panels::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
 
-.sec { display: flex; flex-direction: column; gap: 8px; }
-.sec.grow { flex: 1; min-height: 0; }
-.sec h3 {
-  margin: 0;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: .06em;
-  text-transform: uppercase;
+.panel {
+  display: flex; flex-direction: column;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.panel.grow { flex: 1; min-height: 0; }
+.panel-head {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%;
+  background: none; border: none; border-radius: 0;
+  padding: 7px 9px;
+  font-size: 11px; font-weight: 700; letter-spacing: .04em;
   color: var(--fg-dim);
-  padding-left: 9px;
-  position: relative;
+  text-align: left;
+  cursor: pointer;
 }
-.sec h3::before {
-  content: '';
-  position: absolute; left: 0; top: 50%; transform: translateY(-50%);
-  width: 3px; height: 11px; border-radius: 2px; background: var(--accent);
+.panel-head:hover { background: var(--bg-3); color: var(--fg); }
+.panel.collapsed .panel-head { color: var(--fg-mute); }
+.chev { font-size: 9px; width: 9px; flex: 0 0 9px; color: var(--fg-mute); }
+.panel-body {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 4px 9px 10px;
 }
+.panel.grow .panel-body { flex: 1; min-height: 0; }
 
 .dropzone {
   width: 100%;
@@ -251,9 +310,23 @@ select {
 
 /* ---------- workspace ---------- */
 .workspace { flex: 1; display: flex; min-width: 0; position: relative; background: #08080a; }
-.pane { flex: 1; min-width: 0; position: relative; overflow: hidden; display: flex; }
-.pane + .pane { border-left: 1px solid var(--line); }
-.pane.hidden { flex: 0; display: none; }
+.pane { min-width: 0; position: relative; overflow: hidden; display: flex; }
+.pane.hidden { flex: 0 !important; display: none; }
+
+/* Draggable divider between the 2D and 3D panes. Fixed 50/50 looked fine in
+   screenshots but you always want one of them bigger while working. */
+.splitter {
+  flex: 0 0 5px;
+  cursor: col-resize;
+  background: var(--line);
+  display: flex; align-items: center; justify-content: center;
+  touch-action: none;
+}
+.splitter:hover { background: var(--accent); }
+.splitter-grip {
+  width: 1px; height: 26px;
+  background: var(--fg-mute);
+}
 
 /* `container-type: size` so the stage can be sized against the pane in both
    axes — see below. Its height comes from the flex chain, not from content, so
@@ -355,28 +428,23 @@ select {
 .slider input[type=range] { width: 74px; }
 .slider b { color: var(--accent-hi); font-variant-numeric: tabular-nums; min-width: 30px; text-align: right; }
 
-/* ---------- brush bar ---------- */
-.brushbar {
+/* ---------- status bar ---------- */
+/* PS puts document size, zoom and the current tool's hint down here. It is
+   deliberately read-only: nothing here is a control, so it never steals focus
+   from the canvas. */
+.statusbar {
   flex: 0 0 auto;
-  display: flex; align-items: center; gap: 14px;
-  padding: 8px 14px;
+  display: flex; align-items: center; gap: 12px;
+  padding: 5px 14px;
   background: var(--bg-1);
   border-top: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--fg-dim);
 }
-.brushbar .slider input[type=range] { width: 110px; }
-.brushbar .slider select {
-  font: inherit; font-size: 10px; color: var(--fg-dim);
-  background: var(--bg-2); border: 1px solid var(--line);
-  border-radius: 4px; padding: 1px 3px;
-}
-.target-chip { font-size: 11px; font-weight: 700; }
-.res-chip { font-size: 10px; color: var(--fg-mute); font-variant-numeric: tabular-nums; }
-.perf-chip {
-  font-size: 10px; color: var(--fg-mute); font-variant-numeric: tabular-nums;
-  background: var(--bg-2); border: 1px solid var(--line);
-  border-radius: 5px; padding: 2px 7px; min-width: 78px; text-align: center;
-}
-.busy { font-size: 11px; color: var(--accent-hi); }
+.st-item { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.st-item.dim { color: var(--fg-mute); }
+.statusbar .target-chip { font-weight: 700; }
+.statusbar .busy { color: var(--accent-hi); }
 
 .shortcuts {
   position: fixed; right: 16px; bottom: 56px;
