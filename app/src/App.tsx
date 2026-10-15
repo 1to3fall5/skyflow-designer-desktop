@@ -6,18 +6,19 @@ import { resolveShortcut, shouldPrevent, SHORTCUT_HELP, type BrushParam, type To
 import type { CursorUV } from './cursor';
 import PaintView, { PaintViewHandle } from './components/PaintView';
 import Preview3D, { Preview3DHandle } from './components/Preview3D';
+import { ToolIcon } from './icons';
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
 type ViewMode = '2d' | 'split' | '3d';
 
 /** Toolbox entries. `key` is also the shortcut, so the two cannot drift. */
-const TOOLS: Array<{ tool: Tool; glyph: string; label: string; key: string }> = [
-  { tool: 'brush', glyph: '✎', label: '画笔', key: 'B' },
-  { tool: 'eraser', glyph: '⌫', label: '橡皮擦', key: 'E' },
-  { tool: 'magic_wand', glyph: '✦', label: '魔棒', key: 'M' },
-  { tool: 'eyedropper', glyph: '⌖', label: '吸管', key: 'I' },
-  { tool: 'pan', glyph: '✥', label: '平移', key: 'H' },
+const TOOLS: Array<{ tool: Tool; icon: string; label: string; key: string }> = [
+  { tool: 'brush', icon: 'brush', label: '画笔', key: 'B' },
+  { tool: 'eraser', icon: 'eraser', label: '橡皮擦', key: 'E' },
+  { tool: 'magic_wand', icon: 'wand', label: '魔棒', key: 'M' },
+  { tool: 'eyedropper', icon: 'pipette', label: '吸管', key: 'I' },
+  { tool: 'pan', icon: 'hand', label: '平移', key: 'H' },
 ];
 
 /** Right-hand panel ids, in display order. */
@@ -516,7 +517,7 @@ export default function App() {
                 title={`${t.label}（${t.key}）`}
                 onClick={() => setTool(t.tool)}
               >
-                <span className="tool-glyph">{t.glyph}</span>
+                <ToolIcon name={t.icon} />
                 <span className="tool-key">{t.key}</span>
               </button>
             ))}

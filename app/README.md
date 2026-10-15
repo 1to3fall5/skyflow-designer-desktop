@@ -56,6 +56,30 @@ app/
 - 实现上，障碍的 B 通道写入放在合成循环**之内**该图层的栈位上，而不是循环结束后
   再补一遍。放在循环外会让障碍变成全局无条件，无论上面涂多少都改不动。
 
+## 配色
+
+用的 Photoshop「Pro (Dark)」色板，数值取自
+[PhotoCraft](https://github.com/storytold/photocraft) 的
+`crates/ui-egui/src/theme.rs`（`ThemeKind::Pro`），它本身是从 Photoshop 取样的。
+
+关键是**中性灰**——Photoshop 的界面里除了唯一的强调色外没有任何色相：
+
+| 角色 | 值 | 说明 |
+|---|---|---|
+| `dock` | `#1e1e1e` | 面板之下 |
+| `chrome` | `#323232` | 顶栏 / 工具箱 / 选项栏 / 状态栏 |
+| `card` | `#323232` | 面板（与 chrome 同值，靠分隔线区分） |
+| `field` | `#242424` | 输入框、下拉——**比卡片更暗**，这是 PS 的做法 |
+| `hover` / `pressed` | `#424242` / `#4e4e4e` | |
+| `row-selected` | `#525252` | 选中行、选中的工具 |
+| `accent` | `#378ef0` | 唯一的彩色，只用于主按钮 |
+| 圆角 | 3 / 4 / 6 px | PS 几乎不倒角 |
+
+选中工具用**更亮的灰**而不是蓝色。蓝色只留给面板里那一个主操作按钮。
+
+如果想换成 PS 默认的中灰亮度（`chrome #535353` / `dock #424242`），
+把 `:root` 里那几个值替换成 PhotoCraft 的 `ThemeKind::ProMedium` 即可。
+
 ## 界面布局
 
 对齐 Photoshop 的骨架：

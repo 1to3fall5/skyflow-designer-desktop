@@ -1,16 +1,67 @@
+/**
+ * Photoshop "Pro (Dark)" tokens.
+ *
+ * Values lifted from PhotoCraft's `crates/ui-egui/src/theme.rs`, ThemeKind::Pro
+ * (MIT OR Apache-2.0) — which is itself sampled off Photoshop. The point of
+ * copying numbers instead of eyeballing them is that Photoshop's UI is *neutral
+ * grey*: no hue anywhere except the single accent. The previous palette was
+ * near-black with a blue-violet accent, which read as "web app with a dark
+ * theme" rather than "image editor".
+ *
+ * Roles, and why each one is where it is:
+ *   dock      - behind the panels. Darker than the cards so a panel has an edge.
+ *   chrome    - title bar, toolbox, options bar, status bar.
+ *   card      - a panel. Photoshop gives cards the same value as chrome.
+ *   field     - inputs and dropdowns. Darker than the card, which is unusual
+ *               for the web but is exactly how PS separates a control from
+ *               the surface it sits on.
+ *   separator - deliberately very low contrast; PS panel edges are barely there.
+ */
 :root {
-  --bg: #0f0f12;
-  --bg-1: #16161a;
-  --bg-2: #1c1c21;
-  --bg-3: #232329;
-  --line: #2d2d33;
-  --line-2: #3a3a43;
-  --fg: #e4e4e7;
-  --fg-dim: #9a9aa5;
-  --fg-mute: #64646e;
-  --accent: #6366f1;
-  --accent-hi: #818cf8;
-  --danger: #f43f5e;
+  --dock: #1e1e1e;
+  --chrome: #323232;
+  --card: #323232;
+  --card-border: #1e1e1e;
+  --field: #242424;
+  --field-border: #4a4a4a;
+  --hover: #424242;
+  --pressed: #4e4e4e;
+  --separator: #1e1e1e;
+  --row-selected: #525252;
+  --tab-strip: #262626;
+  /* Canvas surround — darker than the chrome so the artwork reads as a
+     document in a window. PhotoCraft uses #282828; this is a little darker
+     because the flowmap is mostly mid-grey itself. */
+  --canvas: #141414;
+
+  --txt: #dedede;
+  --txt-dim: #b2b2b2;
+  --txt-faint: #808080;
+  --icon: #c8c8c8;
+
+  --accent: #378ef0;
+  --accent-hi: #6aa8f5;
+  --danger: #ec5b62;
+  --warning: #e8b046;
+
+  /* Photoshop corners are barely rounded: 3 / 4 / 6 px. The 7-12 px radii
+     this stylesheet used came from web-component habits and were a large part
+     of why it did not look like an image editor. */
+  --r-sm: 3px;
+  --r: 4px;
+  --r-lg: 6px;
+
+  /* Legacy aliases, so the rest of the file keeps reading the way it did. */
+  --bg: var(--dock);
+  --bg-1: var(--chrome);
+  --bg-2: var(--card);
+  --bg-3: var(--field);
+  --line: var(--separator);
+  --line-2: var(--field-border);
+  --fg: var(--txt);
+  --fg-dim: var(--txt-dim);
+  --fg-mute: var(--txt-faint);
+
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', system-ui, sans-serif;
   font-size: 13px;
   color-scheme: dark;
@@ -58,7 +109,7 @@ body.adjusting .preview3d * { cursor: none; }
 ::-webkit-scrollbar-thumb {
   background: var(--line-2); border-radius: 5px; border: 2px solid var(--bg);
 }
-::-webkit-scrollbar-thumb:hover { background: #4a4a55; }
+::-webkit-scrollbar-thumb:hover { background: var(--field-border); }
 ::-webkit-scrollbar-corner { background: transparent; }
 
 button, input, select { font: inherit; color: inherit; }
@@ -68,16 +119,20 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 }
 
 button {
-  background: var(--bg-3);
-  border: 1px solid var(--line);
-  border-radius: 7px;
+  background: var(--chrome);
+  border: 1px solid var(--field-border);
+  border-radius: var(--r);
   padding: 5px 10px;
   cursor: pointer;
   transition: background .12s, border-color .12s, color .12s;
 }
-button:hover { background: #2f2f38; border-color: var(--line-2); }
-button:active { transform: translateY(1px); }
-button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* No translateY on :active. A button that jumps under the cursor is a web
+   idiom; every native tool button just changes value. */
+button:hover { background: var(--hover); border-color: var(--field-border); }
+button:active { background: var(--pressed); }
+/* Photoshop marks a selected tool with a lighter grey, not a colour. Blue is
+   reserved for the one primary action in a panel. */
+button.on { background: var(--row-selected); border-color: var(--field-border); color: #fff; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
 button.primary:hover { background: var(--accent-hi); }
 button.danger:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
@@ -110,7 +165,7 @@ input[type=range]::-webkit-slider-thumb {
 select {
   background: var(--bg-3);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--r);
   padding: 3px 6px;
 }
 
@@ -132,15 +187,15 @@ select {
 .brand { display: flex; align-items: center; gap: 7px; font-size: 14px; }
 .brand b { font-weight: 700; letter-spacing: -.2px; }
 .brand-sub { color: var(--accent-hi); font-weight: 600; }
+/* Flat, no gradient, no glow: Photoshop chrome has neither. */
 .brand-mark {
-  width: 20px; height: 20px; border-radius: 6px;
-  background: linear-gradient(135deg, #6366f1, #22d3ee);
-  box-shadow: 0 2px 10px rgba(99,102,241,.35);
+  width: 18px; height: 18px; border-radius: var(--r-sm);
+  background: var(--accent);
 }
 .menu-group { display: flex; gap: 4px; }
 .menu-group.segmented button { border-radius: 0; }
-.menu-group.segmented button:first-child { border-radius: 7px 0 0 7px; }
-.menu-group.segmented button:last-child { border-radius: 0 7px 7px 0; }
+.menu-group.segmented button:first-child { border-radius: var(--r) 0 0 var(--r); }
+.menu-group.segmented button:last-child { border-radius: 0 var(--r) var(--r) 0; }
 .menu-group.segmented button + button { border-left: none; }
 .project-name { color: var(--fg-mute); font-size: 11px; }
 
@@ -181,12 +236,12 @@ select {
   position: relative;
   width: 34px; height: 34px;
   display: flex; align-items: center; justify-content: center;
-  background: none; border: 1px solid transparent; border-radius: 7px;
+  background: none; border: 1px solid transparent; border-radius: var(--r);
   padding: 0;
 }
 .toolbox .tool:hover { background: var(--bg-3); }
-.toolbox .tool.on { background: var(--bg-3); border-color: var(--accent); }
-.tool-glyph { font-size: 15px; line-height: 1; color: var(--fg-dim); }
+.toolbox .tool.on { background: var(--row-selected); border-color: var(--field-border); }
+.tool-glyph { color: var(--icon); display: block; }
 .toolbox .tool.on .tool-glyph { color: #fff; }
 /* The shortcut letter sits in the corner, the way PS marks its tools. */
 .tool-key {
@@ -214,7 +269,7 @@ select {
   display: flex; flex-direction: column;
   background: var(--bg-2);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--r);
   overflow: hidden;
 }
 .panel.grow { flex: 1; min-height: 0; }
@@ -242,7 +297,7 @@ select {
   aspect-ratio: 2 / 1;
   border: 2px dashed var(--line);
   background: var(--bg-2);
-  border-radius: 12px;
+  border-radius: var(--r-lg);
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
   color: var(--fg-mute);
 }
@@ -253,10 +308,12 @@ select {
 .thumb { width: 56px; height: 28px; object-fit: cover; border-radius: 5px; border: 1px solid var(--line); }
 .thumb-meta { flex: 1; min-width: 0; font-size: 11px; color: var(--fg-dim); }
 
-.seg { display: flex; gap: 3px; background: var(--bg-2); padding: 3px; border-radius: 9px; border: 1px solid var(--line); }
-.seg button { flex: 1; border: none; background: none; padding: 4px 6px; font-size: 11px; border-radius: 6px; color: var(--fg-mute); }
-.seg button:hover { background: var(--bg-3); color: var(--fg); }
-.seg button.on { background: var(--bg-3); color: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
+/* A segmented control in Photoshop is a recessed strip, not a pill: the well is
+   darker than the surface and the selected segment sits flush in it. */
+.seg { display: flex; gap: 2px; background: var(--field); padding: 2px; border-radius: var(--r); border: 1px solid var(--separator); }
+.seg button { flex: 1; border: none; background: none; padding: 4px 6px; font-size: 11px; border-radius: var(--r-sm); color: var(--txt-dim); }
+.seg button:hover { background: var(--hover); color: var(--txt); }
+.seg button.on { background: var(--row-selected); color: #fff; }
 .seg.small { padding: 1px; gap: 1px; }
 .seg.small button { padding: 1px 5px; font-size: 9px; }
 
@@ -272,7 +329,7 @@ select {
   padding: 6px 8px;
   background: var(--bg-2);
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: var(--r);
   cursor: pointer;
 }
 .layer:hover { border-color: var(--line-2); }
@@ -309,7 +366,9 @@ select {
 .recent { display: flex; flex-direction: column; gap: 2px; }
 
 /* ---------- workspace ---------- */
-.workspace { flex: 1; display: flex; min-width: 0; position: relative; background: #08080a; }
+/* Canvas surround. Darker than the chrome so the artwork reads as a document
+   sitting in a window, the way PS does it. */
+.workspace { flex: 1; display: flex; min-width: 0; position: relative; background: var(--canvas, #141414); }
 .pane { min-width: 0; position: relative; overflow: hidden; display: flex; }
 .pane.hidden { flex: 0 !important; display: none; }
 
@@ -413,7 +472,7 @@ select {
   background: rgba(22,22,26,.82);
   backdrop-filter: blur(10px);
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--r-lg);
   padding: 5px 8px;
   box-shadow: 0 8px 26px rgba(0,0,0,.45);
   max-width: calc(100% - 24px);
@@ -450,7 +509,7 @@ select {
   position: fixed; right: 16px; bottom: 56px;
   background: rgba(22,22,26,.94);
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--r-lg);
   padding: 12px 14px;
   box-shadow: 0 12px 40px rgba(0,0,0,.6);
   z-index: 60;

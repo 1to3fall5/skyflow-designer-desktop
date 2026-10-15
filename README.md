@@ -40,3 +40,13 @@ cd app/src-tauri && cargo test -p skyflow-designer   # Rust 引擎 63 项
 - 图层顺序可调，且逐像素影响合成（上层可覆盖下层障碍）
 
 细节见 [`app/README.md`](app/README.md)。
+
+## 署名
+
+- **界面配色**：Photoshop「Pro (Dark)」色值取自
+  [PhotoCraft](https://github.com/storytold/photocraft) 的
+  `crates/ui-egui/src/theme.rs`（MIT OR Apache-2.0）。PhotoCraft 是 Rust + egui
+  实现，UI 代码本身不适用于本项目，仅参考其主题 token。
+- **工具图标**：[Lucide](https://github.com/lucide-icons/lucide)（ISC），
+  `brush / eraser / wand / pipette / hand`，以 SVG path 内嵌在 `app/src/icons.tsx`。
+- Adobe 与 Photoshop 的商标仅用于描述交互兼容，本项目与其无关。

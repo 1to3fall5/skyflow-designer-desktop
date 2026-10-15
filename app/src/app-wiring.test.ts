@@ -15,6 +15,7 @@ import rawSrc from './App.tsx?raw';
 import rawPaintView from './components/PaintView.tsx?raw';
 import rawPreview3D from './components/Preview3D.tsx?raw';
 import rawShortcuts from './shortcuts?raw';
+import rawIcons from './icons?raw';
 // Vite's CSS plugin turns `styles.css?raw` into an empty string, so read
 // the source straight off disk. Everything else here uses `?raw`.
 import { readFileSync } from 'node:fs';
@@ -350,8 +351,7 @@ describe('Photoshop-style shell', () => {
   it('puts a vertical toolbox on the left', () => {
     expect(src).toMatch(/<nav className="toolbox">/);
     expect(src).toMatch(/TOOLS\.map\(\(t\) =>/);
-    // The glyph is the icon, the key is the shortcut hint in the corner.
-    expect(src).toMatch(/className="tool-glyph"/);
+    expect(src).toMatch(/<ToolIcon name=\{t\.icon\} \/>/);
     expect(src).toMatch(/className="tool-key"/);
   });
 
@@ -406,5 +406,88 @@ describe('Photoshop-style shell', () => {
     expect(src).toMatch(/\{!shellHidden && \(\s*<nav className="toolbox">/);
     expect(src).toMatch(/\{!shellHidden && \(\s*<aside className="panels">/);
     expect(src).toMatch(/\{!shellHidden && \(\s*<div className="optionsbar">/);
+  });
+});
+
+describe('Photoshop "Pro (Dark)" palette', () => {
+  /**
+   * Values taken from PhotoCraft's `crates/ui-egui/src/theme.rs`
+   * (ThemeKind::Pro), which is itself sampled off Photoshop.
+   *
+   * The thing being tested is not the exact hex — it is that the chrome is
+   * *neutral grey*. The old palette was near-black (#0f0f12) with a blue-violet
+   * accent (#6366f1), which reads as "web app with a dark theme". Photoshop has
+   * no hue in its chrome at all.
+   */
+  const root = rawStyles.slice(0, rawStyles.indexOf('* { box-sizing'));
+
+  it('uses neutral greys for every surface', () => {
+    for (const [name, hex] of [
+      ['--dock', '#1e1e1e'],
+      ['--chrome', '#323232'],
+      ['--card', '#323232'],
+      ['--field', '#242424'],
+      ['--hover', '#424242'],
+      ['--pressed', '#4e4e4e'],
+      ['--row-selected', '#525252'],
+    ]) {
+      expect(root, `${name} should be ${hex}`).toContain(`${name}: ${hex}`);
+    }
+  });
+
+  it('keeps the greys neutral — equal R, G and B', () => {
+    // Any channel spread here means a tint has crept back in.
+    const greys = ['--dock', '--chrome', '--card', '--field', '--hover', '--pressed', '--separator'];
+    for (const name of greys) {
+      const m = root.match(new RegExp(`${name}: #([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})`));
+      expect(m, `${name} must be defined`).not.toBeNull();
+      const [r, g, b] = m!.slice(1, 4);
+      expect(r, `${name} is not neutral`).toBe(g);
+      expect(g, `${name} is not neutral`).toBe(b);
+    }
+  });
+
+  it('has dropped the old blue-violet accent', () => {
+    expect(rawStyles).not.toContain('#6366f1');
+    expect(rawStyles).not.toContain('#818cf8');
+    // ...in favour of Photoshop's single blue.
+    expect(root).toContain('--accent: #378ef0');
+  });
+
+  it('marks a selected tool with grey, not colour', () => {
+    // Blue is reserved for the one primary action; PS selects tools by value.
+    expect(rawStyles).toMatch(/button\.on \{ background: var\(--row-selected\)/);
+    expect(rawStyles).toMatch(/\.toolbox \.tool\.on \{ background: var\(--row-selected\)/);
+  });
+
+  it('rounds corners the way Photoshop does', () => {
+    // 7-12px radii were a web-component habit and a big part of why it did
+    // not look like an image editor.
+    expect(root).toContain('--r-sm: 3px');
+    expect(root).toContain('--r: 4px');
+    expect(root).toContain('--r-lg: 6px');
+  });
+
+  it('has no gradients or glow in the chrome', () => {
+    expect(rawStyles).not.toMatch(/linear-gradient/);
+    expect(rawStyles).not.toMatch(/box-shadow: 0 1px 4px/);
+  });
+});
+
+describe("tool icons", () => {
+  const icons = rawIcons;
+  // Unicode glyphs came from five different fonts, so they never lined up and
+  // two fell back to emoji on some machines.
+  it('ships real SVG paths, one per tool', () => {
+    expect(icons).toMatch(/stroke="currentColor"/);
+    expect(icons).toMatch(/viewBox="0 0 24 24"/);
+    for (const name of ['brush', 'eraser', 'wand', 'pipette', 'hand']) {
+      expect(icons, `missing ${name}`).toContain(`${name}: [`);
+    }
+  });
+
+  it('attributes Lucide, since the icons are not ours', () => {
+    expect(icons).toContain('lucide-icons/lucide');
+    expect(icons).toContain('ISC');
   });
 });
