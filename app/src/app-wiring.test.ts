@@ -448,10 +448,11 @@ describe('panels hold state, the menu holds actions', () => {
 
   it('moves the view toggles off the canvas and into a 视图 panel', () => {
     expect(src).toMatch(/const panelTitle: Record<PanelId, string> = \{[\s\S]*?view: '视图',/);
-    // All four, as checkboxes — no floating bar to make icons legible.
+    // All four, as switches — no floating bar to make icons legible. Now on the
+    // rows they govern rather than in their own grid, hence `on=` not `checked=`.
     for (const what of ['showReference', 'showFlowMap', 'showArrows', 'animating']) {
-      expect(src, `${what} should have a checkbox`).toMatch(
-        new RegExp(`checked=\\{${what}\\}`));
+      expect(src, `${what} should have a switch`).toMatch(
+        new RegExp(`on=\\{${what}\\}`));
     }
   });
 
@@ -621,6 +622,63 @@ describe('panel contents, laid out the way Photoshop lays them out', () => {
   });
 });
 
+describe('a switch sits on the parameters it governs', () => {
+  /**
+   * 视图 used to be a grid of four checkboxes in one section and five sliders
+   * in another, labelled 贴图 / 叠加 / 密度 / 速度 / 强度. Nothing said which
+   * switch went with which slider — and 速度 / 强度 both answered to 播放动画
+   * while only one of them was anywhere near it.
+   *
+   * This is PS's 图层样式 grammar instead: ticking an effect reveals that
+   * effect's own settings, indented underneath it, so ownership is geometry
+   * rather than something you have to remember.
+   */
+  const view = src.match(/    view: \([\s\S]*?\n    \),/)![0];
+
+  it('binds each switch to its own slider', () => {
+    expect(src).toMatch(/function Toggle\(\{ label, on, onChange, children \}/);
+    expect(src).toMatch(/<div className="tog-group">/);
+    expect(src).toMatch(/<label className="tog"/);
+    // The switch is a real <label>, so its text is part of the hit target — a
+    // 13px checkbox on its own is a fiddly click, and the name is what you are
+    // aiming at anyway.
+    expect(src).toMatch(/<span className="ellipsis">\{label\}<\/span>/);
+
+    // Four switches, and no separate grid of checkboxes left in 视图.
+    expect(view.match(/<Toggle label=/g)).toHaveLength(4);
+    expect(view).not.toContain('className="checks"');
+    for (const label of ['天空贴图', '叠加 Flowmap', '流向箭头', '播放动画']) {
+      expect(view, `视图 is missing the ${label} switch`).toContain(`<Toggle label="${label}"`);
+    }
+  });
+
+  it('nests 速度 and 强度 under 播放动画, not next to it', () => {
+    // Two rows, one switch — the case a flat list cannot express.
+    const anim = view.match(/<Toggle label="播放动画"[\s\S]*?<\/Toggle>/)![0];
+    expect(anim).toContain('<Row label="速度"');
+    expect(anim).toContain('<Row label="强度"');
+    expect(anim.match(/<Row label=/g)).toHaveLength(2);
+    // The three overlays get exactly one parameter each.
+    for (const label of ['天空贴图', '叠加 Flowmap', '流向箭头']) {
+      const g = view.match(new RegExp(`<Toggle label="${label}"[\\s\\S]*?</Toggle>`))![0];
+      expect(g.match(/<Row label=/g), `${label} should own one row`).toHaveLength(1);
+    }
+  });
+
+  it('indents the parameters under the switch text, and keeps the switch lit', () => {
+    // 19px = checkbox plus gap, so the rows align with the switch's *word*
+    // rather than with its box — aligning to the box leaves them hanging
+    // further left than the thing they belong to.
+    expect(rawStyles).toMatch(/\.tog-body \{ padding-left: 19px;/);
+    // The switch stays at full brightness: it is the control you use to turn
+    // the group back on, and a dimmed control you are supposed to click is a
+    // contradiction.
+    expect(rawStyles).not.toMatch(/\.tog\.off|\.tog-group\.off/);
+    const tog = rawStyles.match(/\.tog \{[^}]*\}/)![0];
+    expect(tog).toContain('color: var(--txt);');
+  });
+});
+
 describe('a control that does not apply is dimmed, not removed', () => {
   /**
    * Conditional controls are what make a panel jump. Ticking 叠加 Flowmap in
@@ -633,31 +691,28 @@ describe('a control that does not apply is dimmed, not removed', () => {
    * more informative — it says 叠加 Flowmap *has* an opacity at all, which a
    * row that only exists while it is on can never tell you.
    */
+  const view = src.match(/    view: \([\s\S]*?\n    \),/)![0];
 
-  it('renders 参数 rows unconditionally and gates them with `off`', () => {
-    // The bug: `<Section title="参数">` was inside
-    // `{(showReference || showFlowMap || showArrows || animating) && (…)}`.
-    expect(src).toMatch(/<Section title="参数">/);
+  it('renders every slider unconditionally and gates it with `off`', () => {
+    // The bug: a `参数` section that existed only while one of the overlays was
+    // on, plus one row per *enabled* overlay.
+    expect(src).not.toMatch(/<Section title="参数">/);
     expect(src).not.toMatch(/\(showReference \|\| showFlowMap \|\| showArrows \|\| animating\)/);
+    expect(view).not.toMatch(/\{(showReference|showFlowMap|showArrows|animating) &&/);
 
-    // Every row is present, and each one is dimmed by the flag that gates it.
-    const sect = src.match(/<Section title="参数">[\s\S]*?<\/Section>/)![0];
-    expect(sect).not.toMatch(/\{(showReference|showFlowMap|showArrows|animating) &&/);
-    for (const [label, flag] of
-      [['贴图', 'showReference'], ['叠加', 'showFlowMap'], ['密度', 'showArrows'],
-       ['速度', 'animating'], ['强度', 'animating']] as const) {
-      expect(sect, `${label} must always render`).toContain(`<Row label="${label}"`);
-      expect(sect, `${label} must be dimmed by ${flag}`).toContain(`off={!${flag}}`);
+    // Five sliders, always present, each dimmed by the flag that gates it.
+    expect(view.match(/<Row label=/g)).toHaveLength(5);
+    for (const flag of ['showReference', 'showFlowMap', 'showArrows', 'animating']) {
+      expect(view, `${flag} must dim its own row`).toContain(`off={!${flag}}`);
     }
-    // Five rows in, five rows out — the section does not grow or shrink.
-    expect(sect.match(/<Row label=/g)).toHaveLength(5);
+    // 动画 owns two, so `animating` appears twice.
+    expect(view.match(/off=\{!animating\}/g)).toHaveLength(2);
   });
 
   it('disables the slider too, so a dimmed row is actually inert', () => {
     // Dimming alone is a lie about state: the row looks unavailable but still
     // takes drags, and moving it would change a value you cannot see applied.
-    const sect = src.match(/<Section title="参数">[\s\S]*?<\/Section>/)![0];
-    expect(sect.match(/disabled=\{!\w+\}/g)).toHaveLength(5);
+    expect(view.match(/disabled=\{!\w+\}/g)).toHaveLength(5);
     expect(src).toMatch(/function Range\(\{[\s\S]*?disabled \}/);
     expect(src).toMatch(/disabled=\{disabled\}/);
     // ...and the inert look has to exist, or `disabled` is a no-op here:

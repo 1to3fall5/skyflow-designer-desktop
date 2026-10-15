@@ -452,6 +452,24 @@ button:disabled { opacity: .35; cursor: default; }
 }
 .row select { flex: 1; min-width: 0; }
 
+/* A switch with its own parameters indented under it.
+ *
+ * The indent is what turns "a list of switches and a list of sliders" into
+ * "this slider belongs to that switch". It is 19px so the parameters line up
+ * with the switch's *text*, not with its box — aligning to the box leaves the
+ * parameters hanging further left than the word they belong to. */
+.tog-group { display: flex; flex-direction: column; gap: 3px; }
+.tog {
+  display: flex; align-items: center; gap: 6px;
+  min-height: 20px;
+  font-size: 11px; color: var(--txt);
+  cursor: pointer;
+}
+.tog:hover { color: #fff; }
+/* Off is still full brightness: it is the control you use to turn the group
+   back on, so dimming it would dim the only thing here that is actionable. */
+.tog-body { padding-left: 19px; display: flex; flex-direction: column; }
+
 /* A row whose control does not apply right now.
  *
  * `.off` exists so a control can be *present but inert* instead of absent.
@@ -526,13 +544,15 @@ input[type=checkbox] {
   cursor: pointer;
 }
 .checks { display: grid; grid-template-columns: 1fr 1fr; gap: 3px 8px; }
-.checks label, .check {
+/* Only 导出 still uses the grid: 视图's four switches moved onto the rows they
+   govern, as <Toggle> groups. */
+.checks label {
   display: flex; align-items: center; gap: 6px;
   min-height: 20px;
   font-size: 11px; color: var(--txt-dim);
   cursor: pointer;
 }
-.checks label:hover, .check:hover { color: var(--txt); }
+.checks label:hover { color: var(--txt); }
 
 /* Prose inside a panel: a paint layer has no parameters, and an empty panel
    looks broken. Explain where its parameters actually live instead. */

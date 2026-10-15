@@ -749,22 +749,19 @@ export default function App() {
           )}
           {activeLayer.kind === 'obstacle' && (
             <>
-              <Row label="扰动">
-                <label className="check">
-                  <input type="checkbox" checked={activeLayer.disturbance_enabled}
-                    onChange={(e) => updateLayer(activeLayer.id, { disturbance_enabled: e.target.checked })} />
-                  绕开障碍物流动
-                </label>
-              </Row>
-              {/* Same rule as 视图's 参数: dim, don't disappear. Ticking 绕开
-                  障碍物流动 used to grow the panel by a row and by that much
-                  push 边缘 and 混合 down under the pointer. */}
-              <Row label="范围" off={!activeLayer.disturbance_enabled}
-                value={`${Math.round(activeLayer.disturbance * 100)}%`}>
-                <Range min={0} max={1} step={0.05} value={activeLayer.disturbance}
-                  onChange={(v) => updateLayer(activeLayer.id, { disturbance: v })}
-                  disabled={!activeLayer.disturbance_enabled} />
-              </Row>
+              <Toggle label="绕开障碍物流动"
+                on={activeLayer.disturbance_enabled}
+                onChange={(v) => updateLayer(activeLayer.id, { disturbance_enabled: v })}>
+                {/* Dimmed, not removed: ticking the switch used to grow the
+                    panel by a row and by that much push 边缘 and 混合 down
+                    under the pointer. */}
+                <Row label="范围" off={!activeLayer.disturbance_enabled}
+                  value={`${Math.round(activeLayer.disturbance * 100)}%`}>
+                  <Range min={0} max={1} step={0.05} value={activeLayer.disturbance}
+                    onChange={(v) => updateLayer(activeLayer.id, { disturbance: v })}
+                    disabled={!activeLayer.disturbance_enabled} />
+                </Row>
+              </Toggle>
             </>
           )}
         </Section>
@@ -867,62 +864,46 @@ export default function App() {
       </>
     ),
 
-    /* Everything that used to hang over the canvas. The toggles are plain
-       checkboxes rather than icon buttons because there is no longer a
-       floating bar to make them cryptic. */
+    /* Everything that used to hang over the canvas, each switch sitting on the
+       parameters it governs — see <Toggle>. */
     view: (
       <>
         <Section title="叠加">
-          <div className="checks">
-            <label><input type="checkbox" checked={showReference}
-              onChange={(e) => setShowReference(e.target.checked)} /> 天空贴图</label>
-            <label><input type="checkbox" checked={showFlowMap}
-              onChange={(e) => setShowFlowMap(e.target.checked)} /> 叠加 Flowmap</label>
-            <label><input type="checkbox" checked={showArrows}
-              onChange={(e) => setShowArrows(e.target.checked)} /> 流向箭头</label>
-            <label><input type="checkbox" checked={animating}
-              onChange={(e) => setAnimating(e.target.checked)} /> 播放动画</label>
-          </div>
+          <Toggle label="天空贴图" on={showReference} onChange={setShowReference}>
+            <Row label="不透明度" off={!showReference}
+              value={`${Math.round(referenceOpacity * 100)}%`}>
+              <Range min={0} max={1} value={referenceOpacity}
+                onChange={setReferenceOpacity} disabled={!showReference} />
+            </Row>
+          </Toggle>
+          <Toggle label="叠加 Flowmap" on={showFlowMap} onChange={setShowFlowMap}>
+            <Row label="不透明度" off={!showFlowMap}
+              value={`${Math.round(flowMapOpacity * 100)}%`}>
+              <Range min={0} max={1} value={flowMapOpacity}
+                onChange={setFlowMapOpacity} disabled={!showFlowMap} />
+            </Row>
+          </Toggle>
+          <Toggle label="流向箭头" on={showArrows} onChange={setShowArrows}>
+            <Row label="密度" off={!showArrows} value={String(arrowDensity)}>
+              <Range min={16} max={128} step={4} value={arrowDensity}
+                onChange={setArrowDensity} disabled={!showArrows} />
+            </Row>
+          </Toggle>
         </Section>
 
-        {/*
-          Every row is always here. A row whose overlay is off is *disabled*,
-          never absent.
-
-          The previous version rendered 参数 only once one of the overlays was
-          on, and one row per *enabled* overlay. Ticking a box therefore shoved
-          the whole column below it down — by a row for the second tick, by an
-          entire section (header, rule and all) for the first. You click a
-          checkbox and the thing you were about to click has moved.
-
-          PS never does this: its panels have a fixed set of controls and grey
-          out the ones that do not apply. Constant height also has a second
-          benefit — you can see that 叠加 Flowmap has an opacity at all, which
-          is not something a row that only exists while it is on can tell you.
-        */}
-        <Section title="参数">
-          <Row label="贴图" off={!showReference}
-            value={`${Math.round(referenceOpacity * 100)}%`}>
-            <Range min={0} max={1} value={referenceOpacity}
-              onChange={setReferenceOpacity} disabled={!showReference} />
-          </Row>
-          <Row label="叠加" off={!showFlowMap}
-            value={`${Math.round(flowMapOpacity * 100)}%`}>
-            <Range min={0} max={1} value={flowMapOpacity}
-              onChange={setFlowMapOpacity} disabled={!showFlowMap} />
-          </Row>
-          <Row label="密度" off={!showArrows} value={String(arrowDensity)}>
-            <Range min={16} max={128} step={4} value={arrowDensity}
-              onChange={setArrowDensity} disabled={!showArrows} />
-          </Row>
-          <Row label="速度" off={!animating} value={speed.toFixed(2)}>
-            <Range min={0} max={2} step={0.05} value={speed}
-              onChange={setSpeed} disabled={!animating} />
-          </Row>
-          <Row label="强度" off={!animating} value={distortion.toFixed(2)}>
-            <Range min={0} max={0.5} value={distortion}
-              onChange={setDistortion} disabled={!animating} />
-          </Row>
+        {/* 速度 and 强度 both answer to 播放动画, which is the case a flat list
+            cannot express: two rows, one switch. */}
+        <Section title="动画">
+          <Toggle label="播放动画" on={animating} onChange={setAnimating}>
+            <Row label="速度" off={!animating} value={speed.toFixed(2)}>
+              <Range min={0} max={2} step={0.05} value={speed}
+                onChange={setSpeed} disabled={!animating} />
+            </Row>
+            <Row label="强度" off={!animating} value={distortion.toFixed(2)}>
+              <Range min={0} max={0.5} value={distortion}
+                onChange={setDistortion} disabled={!animating} />
+            </Row>
+          </Toggle>
         </Section>
       </>
     ),
@@ -1357,6 +1338,41 @@ function Range({ value, min, max, step = 0.01, onChange, title, disabled }:
       style={{ '--p': `${pct}%` } as React.CSSProperties}
       onChange={(e) => onChange(Number(e.target.value))}
     />
+  );
+}
+
+/**
+ * A switch, with the parameters it governs nested underneath it.
+ *
+ * 视图 used to be a grid of four checkboxes in one section and five sliders in
+ * another, labelled 贴图 / 叠加 / 密度 / 速度 / 强度. Nothing said which switch
+ * went with which slider, and 速度 / 强度 both answered to 播放动画 while only
+ * one of them was anywhere near it. This is PS's 图层样式 grammar instead:
+ * ticking an effect reveals that effect's own settings, indented under it, so
+ * ownership is a matter of geometry rather than of remembering.
+ *
+ * The switch is a real `<label>`, so its text is part of the hit target — a
+ * 13px checkbox alone is a fiddly click, and the name is what you are aiming
+ * at anyway.
+ *
+ * The switch stays lit even when what it governs is dimmed. It is the control
+ * you use to switch those parameters back on; a greyed-out control you are
+ * supposed to click is a contradiction.
+ */
+function Toggle({ label, on, onChange, children }:
+  { label: string; on: boolean; onChange: (v: boolean) => void;
+    children?: React.ReactNode }) {
+  return (
+    <div className="tog-group">
+      <label className="tog" title={`${on ? '关闭' : '开启'}${label}`}>
+        <input type="checkbox" checked={on}
+          onChange={(e) => onChange(e.target.checked)} />
+        <span className="ellipsis">{label}</span>
+      </label>
+      {/* 19px = the checkbox plus its gap, so the parameters line up with the
+          switch's text rather than with the box. */}
+      {children && <div className="tog-body">{children}</div>}
+    </div>
   );
 }
 
