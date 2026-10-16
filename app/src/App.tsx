@@ -530,16 +530,57 @@ export default function App() {
   /**
    * Replace the active layer's effects.
    *
-   * No `done == false` case: an effect is set by a discrete click or a slider
-   * release, and unlike dragging an anchor there is no gesture to coalesce —
-   * one change, one history entry.
+   * `history` distinguishes a discrete edit (add / remove / toggle — one entry,
+   * like any other click) from a slider drag, which earns none. That is the
+   * same split 不透明度 and 方向 already use: `updateLayer` never writes
+   * history, so a dragged slider has never been an undo step.
+   *
+   * Requests are coalesced: a blur is whole-canvas, so one round trip can be
+   * tens of milliseconds, and a drag emits an input event every frame. Sending
+   * them all would build a queue whose tail is always stale. Instead there is
+   * at most one in flight and the newest value waits for it — the engine works
+   * at its own pace and the last thing you asked for is what lands.
    */
-  const changeEffects = useCallback(async (effects: LayerEffect[]) => {
+  const fxPending = useRef<{ effects: LayerEffect[]; history: boolean } | null>(null);
+  const fxBusy = useRef(false);
+
+  const flushFx = useCallback(async () => {
+    if (fxBusy.current) return;
+    const next = fxPending.current;
+    if (!next) return;
+    fxPending.current = null;
     const id = stateRef.current?.active;
     if (!id) return;
-    applyUpdate(await api.setEffects(id, effects));
-    api.saveHistory();
+    fxBusy.current = true;
+    try {
+      applyUpdate(await api.setEffects(id, next.effects));
+      if (next.history) api.saveHistory();
+    } finally {
+      fxBusy.current = false;
+      if (fxPending.current) void flushFx();
+    }
   }, [applyUpdate]);
+
+  const changeEffects = useCallback((effects: LayerEffect[], history = false) => {
+    fxPending.current = { effects, history };
+    void flushFx();
+  }, [flushFx]);
+
+  /**
+   * The amount being dragged, before the engine has confirmed it.
+   *
+   * The slider is controlled by engine state, so without this the thumb snaps
+   * back to the last value the engine acknowledged — which at 4096² is a
+   * hundred milliseconds behind the pointer. Echoed until the engine agrees.
+   */
+  const [fxScrub, setFxScrub] = useState<{ i: number; v: number } | null>(null);
+  useEffect(() => {
+    if (!fxScrub) return;
+    const st = stateRef.current;
+    const l = st?.layers.find((x) => x.id === st.active);
+    const amt = l?.effects[fxScrub.i]?.amount;
+    if (amt !== undefined && Math.abs(amt - fxScrub.v) < 0.5) setFxScrub(null);
+  }, [fxScrub, state]);
 
   /**
    * One pen slider.
@@ -937,7 +978,7 @@ export default function App() {
               slider. */}
           <IconBtn icon="fx" title={canFx ? '添加图层效果：模糊' : '障碍层由遮罩决定边缘，它没有可加的效果'}
             disabled={!canFx}
-            onClick={() => activeLayer && changeEffects(addEffect(activeLayer.effects, 'blur'))} />
+            onClick={() => activeLayer && changeEffects(addEffect(activeLayer.effects, 'blur'), true)} />
           <span className="bar-sep" />
           {/* Keyboard- and pointer-reachable reordering. Drag and drop works
               too, but it is undiscoverable on its own. */}
@@ -1040,24 +1081,27 @@ export default function App() {
           <div className="fx-list">
             {activeLayer.effects.map((e, ei) => {
               const m = FX_META[e.kind];
+              const amount = fxScrub && fxScrub.i === ei ? fxScrub.v : e.amount;
               return (
                 <div key={ei} className={`fx-row ${e.enabled ? '' : 'off'}`}>
                   <button className={`eye ${e.enabled ? 'shown' : ''}`}
                     title={e.enabled ? `停用${m.label}` : `启用${m.label}`}
                     aria-label={e.enabled ? `停用${m.label}` : `启用${m.label}`}
                     onClick={() =>
-                      changeEffects(setEffectEnabled(activeLayer.effects, ei, !e.enabled))}>
+                      changeEffects(setEffectEnabled(activeLayer.effects, ei, !e.enabled), true)}>
                     <ToolIcon name={e.enabled ? 'eye' : 'sq'} size={13} />
                   </button>
                   <span className="fx-name ellipsis">{m.label}</span>
-                  <Range min={m.min} max={m.max} step={m.step} value={e.amount}
+                  <Range min={m.min} max={m.max} step={m.step} value={amount}
                     title={m.title} disabled={!e.enabled}
-                    onChange={(v) =>
-                      changeEffects(setEffectAmount(activeLayer.effects, ei, v))} />
-                  <span className="fx-val">{e.amount | 0}</span>
+                    onChange={(v) => {
+                      setFxScrub({ i: ei, v });
+                      changeEffects(setEffectAmount(activeLayer.effects, ei, v));
+                    }} />
+                  <span className="fx-val">{amount | 0}</span>
                   <button className="fx-del" title={`删除${m.label}`}
                     aria-label={`删除${m.label}`}
-                    onClick={() => changeEffects(removeEffect(activeLayer.effects, ei))}>
+                    onClick={() => changeEffects(removeEffect(activeLayer.effects, ei), true)}>
                     <ToolIcon name="x" size={12} />
                   </button>
                 </div>

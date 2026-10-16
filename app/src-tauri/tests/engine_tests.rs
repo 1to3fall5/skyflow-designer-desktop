@@ -435,6 +435,69 @@ fn blur_is_seamless_around_equirect_edge() {
     assert!(left > 0 && right > 0, "blur must wrap horizontally: left={left} right={right}");
 }
 
+/// A box blur written the slow way, for the tests below to compare against.
+///
+/// Deliberately naive: one sum per output pixel, no sliding window, no rayon.
+/// It is the specification, not an implementation anybody would ship.
+fn naive_box(src: &[u8], w: usize, h: usize, r: usize, horizontal: bool) -> Vec<u8> {
+    let win = 2 * r as i32 + 1;
+    let half = win / 2;
+    let mut d = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            for c in 0..4usize {
+                let mut sum = 0i32;
+                for k in -(r as i32)..=(r as i32) {
+                    let (sx, sy) = if horizontal {
+                        ((x as i32 + k).rem_euclid(w as i32) as usize, y)
+                    } else {
+                        (x, (y as i32 + k).clamp(0, h as i32 - 1) as usize)
+                    };
+                    sum += src[(sy * w + sx) * 4 + c] as i32;
+                }
+                d[(y * w + x) * 4 + c] = ((sum + half) / win) as u8;
+            }
+        }
+    }
+    d
+}
+
+#[test]
+fn the_vertical_box_pass_matches_a_naive_blur_across_every_strip() {
+    // The vertical pass is split into column strips so that one rayon task
+    // walks a whole column instead of one task per row. The seam between two
+    // strips is the only place that split can go wrong, so the width is
+    // chosen not to divide evenly: 100 columns with a strip of 8 leaves a
+    // 4-column remainder, and a buffer narrower than one strip forces the
+    // single-strip path.
+    //
+    // Opaque throughout, so premultiply / unpremultiply are the identity and
+    // the comparison can be exact rather than within a tolerance.
+    for (w, h) in [(100usize, 40usize), (5, 7), (64, 64), (3, 200)] {
+        let mut b = Buf::new(w, h);
+        for i in 0..w * h {
+            let v = (i * 37 % 251) as u8;
+            // alpha 255 keeps the naive reference valid; the channels still
+            // have to be independent, hence three different patterns.
+            b.data[i * 4] = v;
+            b.data[i * 4 + 1] = v.reverse_bits();
+            b.data[i * 4 + 2] = 255 - v;
+            b.data[i * 4 + 3] = 255;
+        }
+
+        let radius: f32 = 10.0;
+        let br = ((radius * 0.62).max(1.0)).round() as usize;
+        let mut cur = b.data.clone();
+        for _ in 0..3 {
+            cur = naive_box(&cur, w, h, br, true);
+            cur = naive_box(&cur, w, h, br, false);
+        }
+
+        let out = ops::blur(&b, radius);
+        assert_eq!(out.data, cur, "strip split changed the blur at {w}x{h}");
+    }
+}
+
 #[test]
 fn generate_wind_polar_leaves_outside_disc_neutral() {
     let mut b = Buf::new(64, 64);

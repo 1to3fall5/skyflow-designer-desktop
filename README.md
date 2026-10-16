@@ -27,7 +27,7 @@ npx tauri build  # 打包：NSIS 安装包 + MSI
 ## 测试
 
 ```bash
-cd app && npm test          # 前端 267 项 + Rust 引擎 89 项，共 356
+cd app && npm test          # 前端 270 项 + Rust 引擎 90 项，共 360
 cd app && npm run test:fe   # 仅前端
 cd app && npm run test:rust # 仅引擎
 ```

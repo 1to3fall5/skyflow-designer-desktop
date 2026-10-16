@@ -976,7 +976,7 @@ describe('layer effects: something you hang on a layer', () => {
     // PS's "add a layer style" is a button in the panel footer; a hidden
     // slider would only ever appear once you already knew it was there.
     expect(layersPanel).toMatch(/<IconBtn icon="fx"/);
-    expect(layersPanel).toMatch(/changeEffects\(addEffect\(activeLayer\.effects, 'blur'\)\)/);
+    expect(layersPanel).toMatch(/changeEffects\(addEffect\(activeLayer\.effects, 'blur'\), true\)/);
   });
 
   it('refuses the one kind that has no pixels to blur', () => {
@@ -1021,11 +1021,46 @@ describe('layer effects: something you hang on a layer', () => {
   it('sends every effect edit through setEffects and into React state', () => {
     // One command for all four edits, so an effect list can never disagree
     // with the engine about how many effects a layer has.
-    expect(src).toMatch(/const changeEffects = useCallback\(async \(effects: LayerEffect\[\]\) =>/);
-    expect(src).toMatch(/applyUpdate\(await api\.setEffects\(id, effects\)\)/);
-    // An effect is undoable, so it has to be a history entry just like a
-    // layer rename — otherwise Ctrl+Z leaves the badge and the pixels apart.
-    expect(src).toMatch(/api\.setEffects\(id, effects\)\);\s*\n\s*api\.saveHistory\(\);/);
+    expect(src).toMatch(/const changeEffects = useCallback\(\(effects: LayerEffect\[\], history = false\) =>/);
+    expect(src).toMatch(/applyUpdate\(await api\.setEffects\(id, next\.effects\)\)/);
+  });
+
+  it('never has more than one setEffects in flight', () => {
+    // A blur is whole-canvas, so one round trip is tens of milliseconds while
+    // a slider emits an input event every frame. Sending them all queues work
+    // whose tail is always stale; the newest value waits behind the one that
+    // is running and replaces whatever came before it.
+    expect(src).toMatch(/const fxPending = useRef<\{ effects: LayerEffect\[\]; history: boolean \} \| null>\(null\);/);
+    expect(src).toMatch(/const fxBusy = useRef\(false\);/);
+    expect(src).toMatch(/if \(fxBusy\.current\) return;/);
+    // Draining what arrived while this one ran is what makes "latest wins"
+    // true rather than merely "not queued".
+    expect(src).toMatch(/if \(fxPending\.current\) void flushFx\(\);/);
+  });
+
+  it('gives a history entry to clicks, not to slider frames', () => {
+    // Add / remove / toggle are discrete and must be undoable. Dragging the
+    // amount is not: one entry per frame would be forty entries per gesture,
+    // each costing a zstd of the whole layer. This is what 不透明度 and 方向
+    // already do — `updateLayer` never writes history.
+    expect(src).toMatch(/if \(next\.history\) api\.saveHistory\(\);/);
+    expect(layersPanel).toMatch(/changeEffects\(addEffect\(activeLayer\.effects, 'blur'\), true\)/);
+    expect(layersPanel).toMatch(/changeEffects\(removeEffect\(activeLayer\.effects, ei\), true\)/);
+    expect(layersPanel).toMatch(/changeEffects\(setEffectEnabled\(activeLayer\.effects, ei, !e\.enabled\), true\)/);
+    // ...and the amount drag specifically asks for none.
+    expect(layersPanel).not.toMatch(/setEffectAmount\(activeLayer\.effects, ei, v\), true/);
+  });
+
+  it('echoes the amount under the pointer instead of waiting for the engine', () => {
+    // The slider is controlled by engine state, so without an echo the thumb
+    // snaps back to the last value the engine acknowledged — a hundred
+    // milliseconds behind the pointer at 4096².
+    expect(src).toMatch(/const \[fxScrub, setFxScrub\] = useState<\{ i: number; v: number \} \| null>\(null\);/);
+    expect(src).toMatch(/const amount = fxScrub && fxScrub\.i === ei \? fxScrub\.v : e\.amount;/);
+    expect(src).toMatch(/setFxScrub\(\{ i: ei, v \}\);/);
+    // ...and it has to let go once the engine caught up, or a later undo
+    // would keep showing a value the layer no longer has.
+    expect(src).toMatch(/if \(amt !== undefined && Math\.abs\(amt - fxScrub\.v\) < 0\.5\) setFxScrub\(null\);/);
   });
 });
 
