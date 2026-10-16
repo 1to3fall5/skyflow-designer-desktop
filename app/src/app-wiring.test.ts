@@ -302,6 +302,35 @@ describe('eyedropper: Alt picks up the flow strength, like Photoshop', () => {
     expect(src).toMatch(/onPickStrength=\{setBrushStrength\}/);
     expect(src).toMatch(/api\.sampleStrength\(u, v, sampleSource\)/);
   });
+
+  it('is still the eyedropper when the pen is the tool', () => {
+    // The pen gets first refusal on a press, because Alt on an anchor or a
+    // curve means add / remove — but on empty space there is no anchor to
+    // spend it on, and swallowing the click there both started a path the user
+    // did not ask for and left Alt doing nothing at all.
+    //
+    // `penDown` therefore reports whether it consumed the press, and only a
+    // press it *did* consume ends the handler.
+    expect(paintView).toMatch(/const penDown = useCallback\(\(u: number, v: number, alt: boolean\): boolean =>/);
+    expect(paintView).toMatch(/if \(p\.tool === 'pen' && penDown\(u, v, e\.altKey\)\) return;/);
+    expect(paintView).toMatch(/if \(alt\) return false;/);
+    // ...and every other exit from penDown took the press: closing on the
+    // first anchor, grabbing a path, and dropping an anchor.
+    const fn = paintView.slice(
+      paintView.indexOf('const penDown = useCallback'),
+      paintView.indexOf('const onPointerDown = '));
+    expect(fn.match(/return true;/g) ?? []).toHaveLength(3);
+  });
+
+  it('shows the crosshair whenever a pick is actually happening', () => {
+    // Two sources for "am I an eyedropper" is how the ring came to disagree
+    // with the behaviour: the key said one thing while the pick said another,
+    // so Alt looked dead even while it was sampling.
+    expect(paintView).toMatch(/picking\.current = true;\s*pickSticky\.current = p\.tool === 'eyedropper';[\s\S]*?showPicking\(true\);/);
+    // Releasing the mouse is not releasing Alt, so the crosshair outlives the
+    // click while the key is still down.
+    expect(paintView).toMatch(/picking\.current = false;\s*[\s\S]*?showPicking\(e\.altKey\);/);
+  });
 });
 
 describe('2D stage: the flowmap square must never be distorted', () => {
@@ -482,8 +511,9 @@ describe('the pen: a path whose tangent is the flow direction', () => {
 
   it('places anchors instead of dragging ink', () => {
     // The pen must not fall through to the brush branch: a click would stamp a
-    // dab and there would be no path to edit.
-    expect(rawPaintView).toMatch(/if \(p\.tool === 'pen'\) \{/);
+    // dab and there would be no path to edit. It *hand back* the press only
+    // when Alt wanted the eyedropper, hence the return value.
+    expect(rawPaintView).toMatch(/if \(p\.tool === 'pen' && penDown\(u, v, e\.altKey\)\) return;/);
     expect(rawPaintView).toMatch(/const a = \[\.\.\.cur\.a, \{ x: u, y: v, hx: 0, hy: 0 \}\];/);
     expect(rawPaintView).toMatch(/penDrag\.current = a\.length - 1;/);
     // ...and `drawing` — the flag that feeds the brush's flush loop — stays down.

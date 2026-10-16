@@ -670,8 +670,14 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
    * the layer is grabbed; only if neither applies does a click start a new
    * path. Getting that backwards would mean you could never select a path,
    * because every click would begin another one on top of it.
+   *
+   * Returns whether the press was consumed. Alt on empty space is *not*: Alt
+   * is the eyedropper in every tool, so a press that would only have dropped
+   * the first anchor of a new path falls through to it instead. Otherwise
+   * Alt+click on the pen did the one thing it should never do — start a path —
+   * and not the thing Alt is documented to do anywhere else.
    */
-  const penDown = useCallback((u: number, v: number, alt: boolean) => {
+  const penDown = useCallback((u: number, v: number, alt: boolean): boolean => {
     const p = propsRef.current;
     // Screen pixels, so the grab radius feels the same zoomed in or out.
     const sizePx = canvasRef.current?.getBoundingClientRect().width ?? p.size;
@@ -682,7 +688,7 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
       setPen(penRef.current);
       drawPen();
       publishPen();
-      return;
+      return true;
     }
 
     if (cur.a.length === 0) {
@@ -718,8 +724,11 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
         }
         drawPen();
         publishPen();
-        return;
+        return true;
       }
+      // Nothing under the pointer. Alt is not the pen's to spend here: there is
+      // no anchor to add or remove, so let the eyedropper have the click.
+      if (alt) return false;
       // Empty space with nothing drawn: start a path, and drop the selection —
       // clicking away from a path is how you say you are finished with it.
       sel.current = -1;
@@ -731,6 +740,7 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     penDrag.current = a.length - 1;
     drawPen();
     publishPen();
+    return true;
   }, [drawPen, publishPen, pushPaths]);
 
   const onPointerDown = (e: React.PointerEvent) => {
@@ -754,18 +764,19 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     const { u, v } = getUV(e);
     // The pen is tested *before* the Alt eyedropper, because with a pen Alt
     // means "this anchor, here" — add or remove one — which is what Alt does to
-    // a path in Photoshop. The eyedropper is one key away and stickier, so
-    // losing the modifier here costs nothing.
-    if (p.tool === 'pen') {
-      penDown(u, v, e.altKey);
-      return;
-    }
+    // a path in Photoshop. It hands the press back when there is no path under
+    // the pointer, so Alt keeps meaning "pick up the strength" everywhere.
+    if (p.tool === 'pen' && penDown(u, v, e.altKey)) return;
     // Alt = eyedropper, whatever tool is selected. Temporary: it is a modifier,
     // so releasing it returns to the tool on its own. Selecting the eyedropper
     // itself makes it stick for the whole drag.
     if (e.altKey || p.tool === 'eyedropper') {
       picking.current = true;
       pickSticky.current = p.tool === 'eyedropper';
+      // The ring follows the *behaviour*, not just the key. A keyup that went
+      // missing can leave the class off while a pick is in progress, which
+      // reads as "Alt did nothing".
+      showPicking(true);
       sample(u, v);
       return;
     }
@@ -866,6 +877,9 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     (e.target as Element).releasePointerCapture?.(e.pointerId);
     if (picking.current) {
       picking.current = false;
+      // Releasing the mouse is not the same as releasing Alt: keep the
+      // crosshair while the key is still down.
+      showPicking(e.altKey);
       return;
     }
     if (zooming.current) {
