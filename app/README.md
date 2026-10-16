@@ -482,9 +482,14 @@ flowmap 是正方形 UV 空间，所以 `.paint-stage` 不能随面板形状变�
 ```bash
 cd app
 npm install
-npm run tauri dev      # 开发模式
-npm run tauri build    # 产出 NSIS / MSI 安装包
+npx tauri dev          # 开发模式（没有 tauri 脚本，直接调 CLI）
+npx tauri build        # 产出 NSIS / MSI 安装包，约 3 分钟
 ```
+
+`npx tauri` 会自己找 `src-tauri/tauri.conf.json`，并按 `beforeBuildCommand`
+先跑 `npm run build`（`tsc --noEmit && vite build`）——所以不必手动先构建前端。
+产物在 `src-tauri/target/release/`：`skyflow-designer.exe` 是便携版，
+`bundle/nsis/` 和 `bundle/msi/` 是安装包。
 
 前置条件：Node 18+、Rust 1.77+、Windows WebView2 Runtime。
 
