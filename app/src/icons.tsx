@@ -21,6 +21,17 @@ const PATHS: Record<string, string[]> = {
     'M6.5 21A3.5 3.5 0 1 0 3 17.5a2.62 2.62 0 0 1-.708 1.792A1 1 0 0 0 3 21z',
     'M9.969 17.031 21.378 5.624a1 1 0 0 0-3.002-3.002L6.967 14.031',
   ],
+  // A pen nib: the rhombus, the slit down to the point, and the vent hole.
+  //
+  // Hand-drawn rather than Lucide's `pen`, which is a *pencil* — next to the
+  // brush in the toolbox the two were a pair of near-identical diagonals you
+  // had to read the tip of to tell apart. The nib is a shape nothing else in
+  // the box uses.
+  pen: [
+    'M12 2 6 13l6 9 6-9z',
+    'M12 14v8',
+    'M12 11.6a1.6 1.6 0 1 0 0 3.2 1.6 1.6 0 0 0 0-3.2z',
+  ],
   // lucide:eraser
   eraser: [
     'M21 21H8a2 2 0 0 1-1.42-.587l-3.994-3.999a2 2 0 0 1 0-2.828l10-10a2 2 0 0 1 2.829 0l5.999 6a2 2 0 0 1 0 2.828L12.834 21',

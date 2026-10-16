@@ -14,6 +14,7 @@ import { describe, it, expect } from 'vitest';
 import rawSrc from './App.tsx?raw';
 import rawPaintView from './components/PaintView.tsx?raw';
 import rawPreview3D from './components/Preview3D.tsx?raw';
+import rawPen from './pen?raw';
 import rawShortcuts from './shortcuts?raw';
 import rawIcons from './icons?raw';
 // Vite's CSS plugin turns `styles.css?raw` into an empty string, so read
@@ -366,13 +367,15 @@ describe('Photoshop-style shell', () => {
 
   it('lists every tool the shortcut resolver knows about', () => {
     // A tool in the box with no key (or the reverse) is a silent dead end.
-    for (const t of ['brush', 'eraser', 'magic_wand', 'eyedropper', 'pan']) {
+    for (const t of ['brush', 'pen', 'eraser', 'magic_wand', 'eyedropper', 'pan']) {
       expect(src).toContain(`tool: '${t}'`);
     }
     // The union lives in shortcuts.ts, so check it there — otherwise the box
     // and the resolver can drift apart and one tool silently does nothing.
     expect(rawShortcuts).toMatch(
-      /export type Tool = 'brush' \| 'eraser' \| 'magic_wand' \| 'eyedropper' \| 'pan';/);
+      /export type Tool = 'brush' \| 'pen' \| 'eraser' \| 'magic_wand' \| 'eyedropper' \| 'pan';/);
+    // ...and the icon has to exist, or the button is blank.
+    expect(rawIcons).toMatch(/['"]?pen['"]?: \[/);
   });
 
   it('has an options bar that follows the selected tool', () => {
@@ -417,6 +420,94 @@ describe('Photoshop-style shell', () => {
     expect(src).toMatch(/\{!shellHidden && \(\s*<nav className="toolbox">/);
     expect(src).toMatch(/\{!shellHidden && \(\s*<aside className="panels" ref={dockRef}>/);
     expect(src).toMatch(/\{!shellHidden && \(\s*<div className="optionsbar">/);
+  });
+});
+
+describe('the pen: a path whose tangent is the flow direction', () => {
+  /**
+   * A brush's direction is whatever your hand did, which is right for dabbing
+   * and wrong for the thing a flowmap needs most — a long, even sweep across
+   * a sky. The pen makes that exact by construction: anchors, a curve through
+   * them, and the curve's own tangent as the flow vector.
+   *
+   * It costs no new engine plumbing, because a polyline is already the
+   * engine's unit of work and it derives direction from each segment's travel.
+   */
+
+  it('places anchors instead of dragging ink', () => {
+    // The pen must not fall through to the brush branch: a click would stamp a
+    // dab and there would be no path to edit.
+    expect(rawPaintView).toMatch(/if \(p\.tool === 'pen'\) \{/);
+    expect(rawPaintView).toMatch(/const a = \[\.\.\.cur\.a, \{ x: u, y: v, hx: 0, hy: 0 \}\];/);
+    expect(rawPaintView).toMatch(/penDrag\.current = a\.length - 1;/);
+    // ...and `drawing` — the flag that feeds the brush's flush loop — stays down.
+    expect(rawPaintView).not.toMatch(/drawing\.current = true;\s*\n\s*if \(p\.tool === 'pen'\)/);
+  });
+
+  it('lets a drag off a fresh anchor pull out its handle', () => {
+    // The signature pen gesture. Without it every anchor is a corner and the
+    // tool is a polyline drawer.
+    expect(rawPaintView).toMatch(/a\[i\] = \{ \.\.\.p0, hx: u - p0\.x, hy: v - p0\.y \};/);
+    // A click with no drag leaves the handle at zero, which pen.ts reads as
+    // "derive it from the neighbours" — so a plain click still curves.
+    expect(rawPen).toMatch(/if \(p\.hx !== 0 \|\| p\.hy !== 0\) return \{ hx: p\.hx, hy: p\.hy \};/);
+  });
+
+  it('closes a loop by clicking the first anchor', () => {
+    expect(rawPaintView).toMatch(/uvDistPx\(u, v, cur\.a\[0\]\.x, cur\.a\[0\]\.y, rect\.width\) <= CLOSE_PX/);
+    // In screen pixels, not canvas ones: it is a click, so it has to feel the
+    // same whether the view is zoomed in or out.
+    expect(rawPen).toMatch(/export const CLOSE_PX = 10;/);
+  });
+
+  it('commits the whole path as one stroke and one undo step', () => {
+    // One `stroke` call, one stroke id, one `saveHistory`. A path is a single
+    // deliberate act, so it must undo as one.
+    expect(rawPaintView).toMatch(/strokeId\.current = nextStrokeId\(\);/);
+    expect(rawPaintView).toMatch(/api\.stroke\(pts, p\.brushSize, p\.brushHardness, p\.brushStrength, false,/);
+    expect(rawPaintView).toMatch(/propsRef\.current\.onStrokeEnd\(\);/);
+    // Flow is pinned at 1: a path is drawn once, so the brush's flow would
+    // leave it at a fraction of the strength asked for with no way to finish.
+    expect(rawPen).toMatch(/export const PEN_FLOW = 1;/);
+    expect(rawPaintView).toMatch(/strokeId\.current, PEN_FLOW\)/);
+  });
+
+  it('abandons the path when you leave the tool', () => {
+    // Otherwise an invisible path sits there for the next Enter to stamp
+    // somewhere you have forgotten about.
+    expect(rawPaintView).toMatch(/\}, \[props\.tool\]\);/);
+    expect(rawPaintView).toMatch(/setPen\(NO_PATH\);/);
+  });
+
+  it('lets Esc drop the path before it closes the help panel', () => {
+    // The pen methods answer whether they had anything to act on, so the key
+    // is never swallowed twice.
+    expect(src).toMatch(/case 'closeHelp':\s*\n\s*if \(!paintRef\.current\?\.penCancel\(\)\) setShowShortcuts\(false\);/);
+    expect(src).toMatch(/if \(action\.op === 'commit'\) paintRef\.current\?\.penCommit\(\);/);
+    expect(src).toMatch(/else paintRef\.current\?\.penPop\(\);/);
+    expect(rawPaintView).toMatch(/penCommit: commitPen,/);
+  });
+
+  it('keeps the pen off the 3D view rather than letting it act as a brush', () => {
+    // `onPaint` is a catch-all: anything that is not the wand, the dropper or
+    // the hand gets treated as a drag. A pen has no overlay in the 3D view —
+    // it would paint blind, which is worse than not painting at all.
+    expect(src).toMatch(/paintEnabled=\{canPaint && viewMode !== '2d' && tool !== 'pen'\}/);
+  });
+
+  it('counts the anchors in the options bar', () => {
+    // A path in progress with no read-out leaves you unsure whether the click
+    // registered at all.
+    expect(src).toMatch(/onPenInfo=\{setPenInfo\}/);
+    expect(src).toMatch(/\$\{penInfo\.anchors\} 个锚点/);
+    expect(rawPaintView).toMatch(/propsRef\.current\.onPenInfo\?\.\(\{ anchors: pen\.a\.length, closed: pen\.closed \}\);/);
+  });
+
+  it('draws the path on its own overlay, in the same space as the pixels', () => {
+    // Not SVG over the stage: a canvas at the flowmap's resolution pans and
+    // zooms with the artwork for free, the way the arrow overlay already does.
+    expect(rawPaintView).toMatch(/<canvas ref=\{penCanvasRef\} width=\{props\.size\} height=\{props\.size\} className="paint-pen" \/>/);
+    expect(rawStyles).toMatch(/\.paint-pen \{ position: absolute; inset: 0;/);
   });
 });
 

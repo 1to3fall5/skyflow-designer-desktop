@@ -1,7 +1,11 @@
-import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from 'react';
+import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { api, nextStrokeId, decodeBase64, toImageData, Snapshot } from '../api';
 import { nextCursor, shouldClearOnLeave, type CursorUV } from '../cursor';
 import { brushGradient } from '../brush';
+import {
+  CLOSE_PX, PEN_FLOW, flattenPath, uvDistPx,
+  type Anchor,
+} from '../pen';
 import { NON_PAINTING_TOOLS, type Tool } from '../shortcuts';
 
 export interface PaintViewHandle {
@@ -11,6 +15,20 @@ export interface PaintViewHandle {
   resetView: () => void;
   /** Current view scale, for the status bar. */
   getZoom: () => number;
+  /**
+   * Pen path control, driven by Enter / Esc / Backspace. Each returns whether
+   * it actually had a path to act on, so the caller can decide whether the key
+   * was "used up" — Esc with no path must still close the help panel.
+   */
+  penCommit: () => boolean;
+  penCancel: () => boolean;
+  penPop: () => boolean;
+}
+
+/** What the options bar needs to say about the path in progress. */
+export interface PenInfo {
+  anchors: number;
+  closed: boolean;
 }
 
 export interface PaintViewProps {
@@ -44,9 +62,13 @@ export interface PaintViewProps {
   adjusting: React.MutableRefObject<boolean>;
   onStrokeEnd: () => void;
   onFillEnd: () => void;
+  /** Pen path changed, so the options bar can say how many anchors are down. */
+  onPenInfo?: (info: PenInfo) => void;
 }
 
 const ARROW_SAMPLE = 128;
+
+const NO_PATH: { a: Anchor[]; closed: boolean } = { a: [], closed: false };
 
 /**
  * Ring geometry, sized imperatively so a stroke frame never re-renders React.
@@ -73,6 +95,7 @@ function syncRingSize(el: HTMLElement, brushSize: number, size: number, hardness
 const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const arrowRef = useRef<HTMLCanvasElement>(null);
+  const penCanvasRef = useRef<HTMLCanvasElement>(null);
   const cursorRef = useRef<HTMLDivElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const sampleRef = useRef<HTMLCanvasElement | null>(null);
@@ -98,6 +121,17 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
   const zoomStart = useRef<{ y: number; startScale: number } | null>(null);
   const rafId = useRef(0);
   const arrowTimer = useRef(0);
+
+  /**
+   * The pen path. State, not a ref: it is small and it drives an overlay, which
+   * has to repaint. The imperative handle needs to read it from event handlers
+   * that were created in an earlier render, hence the mirror below.
+   */
+  const [pen, setPen] = useState(NO_PATH);
+  const penRef = useRef(pen);
+  penRef.current = pen;
+  /** Index of the anchor whose handle is being dragged, if any. */
+  const penDrag = useRef<number | null>(null);
 
   const applyTransform = useCallback(() => {
     const el = wrapRef.current;
@@ -176,17 +210,6 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     ctx.fill(head);
   }, []);
 
-  useImperativeHandle(ref, () => ({
-    applySnapshot,
-    getCanvas: () => canvasRef.current,
-    refreshArrows,
-    resetView: () => {
-      transform.current = { x: 0, y: 0, scale: 1 };
-      applyTransform();
-    },
-    getZoom: () => transform.current.scale,
-  }), [applySnapshot, refreshArrows, applyTransform]);
-
   // -- flush loop: one IPC per animation frame, not per pointer event -----
   useEffect(() => {
     const flush = () => {
@@ -224,6 +247,81 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     };
   }, []);
 
+  /**
+   * The path overlay: curve, anchors, and the handles you can still grab.
+   *
+   * Drawn on its own canvas at the flowmap's resolution rather than as SVG over
+   * the stage, so it shares one coordinate space with the pixels it is about to
+   * become — and so it pans and zooms with them for free, exactly like the
+   * arrow overlay next to it.
+   */
+  const drawPen = useCallback(() => {
+    const c = penCanvasRef.current;
+    if (!c) return;
+    const ctx = c.getContext('2d');
+    if (!ctx) return;
+    const n = c.width;
+    ctx.clearRect(0, 0, n, n);
+    const { a, closed } = penRef.current;
+    if (a.length === 0) return;
+
+    const X = (x: number) => x * n;
+    const lw = Math.max(1, n / 700);
+
+    const pts = flattenPath(a, closed, n);
+    if (pts.length >= 2) {
+      ctx.beginPath();
+      ctx.moveTo(X(pts[0][0]), X(pts[0][1]));
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(X(pts[i][0]), X(pts[i][1]));
+      if (closed) ctx.closePath();
+      ctx.lineWidth = lw;
+      ctx.strokeStyle = '#378ef0';
+      ctx.stroke();
+    }
+
+    // Handles first, so the anchors sit on top of them.
+    ctx.lineWidth = lw;
+    ctx.strokeStyle = 'rgba(236,236,236,.55)';
+    ctx.fillStyle = '#ececec';
+    for (const p of a) {
+      if (p.hx === 0 && p.hy === 0) continue;
+      ctx.beginPath();
+      ctx.moveTo(X(p.x - p.hx), X(p.y - p.hy));
+      ctx.lineTo(X(p.x + p.hx), X(p.y + p.hy));
+      ctx.stroke();
+      for (const [hx, hy] of [[p.hx, p.hy], [-p.hx, -p.hy]]) {
+        ctx.beginPath();
+        ctx.arc(X(p.x + hx), X(p.y + hy), Math.max(1.5, n / 400), 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    const sq = Math.max(3, n / 300);
+    a.forEach((p, i) => {
+      // The first anchor is ringed: clicking it closes the path, and an
+      // affordance you cannot see is an affordance you will not find.
+      ctx.fillStyle = i === 0 ? '#7cc4ff' : '#ffffff';
+      ctx.fillRect(X(p.x) - sq / 2, X(p.y) - sq / 2, sq, sq);
+      if (i === 0 && a.length > 1) {
+        ctx.lineWidth = lw;
+        ctx.strokeStyle = '#7cc4ff';
+        ctx.strokeRect(X(p.x) - sq, X(p.y) - sq, sq * 2, sq * 2);
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    drawPen();
+    propsRef.current.onPenInfo?.({ anchors: pen.a.length, closed: pen.closed });
+  }, [pen, props.size, drawPen]);
+
+  // A path belongs to the pen. Switching tools abandons it rather than leaving
+  // an invisible one that the next Enter would stamp somewhere you forgot.
+  useEffect(() => {
+    penDrag.current = null;
+    setPen(NO_PATH);
+  }, [props.tool]);
+
   const scheduleArrows = useCallback(() => {
     if (arrowTimer.current) return;
     arrowTimer.current = window.setTimeout(() => {
@@ -231,6 +329,61 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
       refreshArrows();
     }, 80);
   }, [refreshArrows]);
+
+  const commitPen = useCallback(() => {
+    const p = propsRef.current;
+    const { a, closed } = penRef.current;
+    penDrag.current = null;
+    setPen(NO_PATH);
+    if (a.length < 2) return false;
+
+    const pts = flattenPath(a, closed, p.size);
+    if (pts.length < 2) return false;
+
+    // One path, one stroke id, one undo step: the engine resets its deposit
+    // record when the id changes, so a path that crosses itself does not
+    // compound where it overlaps — the same rule a single drag gets.
+    strokeId.current = nextStrokeId();
+    api.stroke(pts, p.brushSize, p.brushHardness, p.brushStrength, false,
+      p.editTarget, strokeId.current, PEN_FLOW)
+      .then((s) => {
+        applySnapshot(s);
+        scheduleArrows();
+        // Same accounting as finishing a brush drag: one history entry, one
+        // thumbnail refresh.
+        propsRef.current.onStrokeEnd();
+      });
+    return true;
+  }, [applySnapshot, scheduleArrows]);
+
+  const cancelPen = useCallback(() => {
+    if (penRef.current.a.length === 0) return false;
+    penDrag.current = null;
+    setPen(NO_PATH);
+    return true;
+  }, []);
+
+  const popPen = useCallback(() => {
+    const cur = penRef.current;
+    if (cur.a.length === 0) return false;
+    penDrag.current = null;
+    setPen({ a: cur.a.slice(0, -1), closed: cur.a.length > 2 ? cur.closed : false });
+    return true;
+  }, []);
+
+  useImperativeHandle(ref, () => ({
+    applySnapshot,
+    getCanvas: () => canvasRef.current,
+    refreshArrows,
+    resetView: () => {
+      transform.current = { x: 0, y: 0, scale: 1 };
+      applyTransform();
+    },
+    getZoom: () => transform.current.scale,
+    penCommit: commitPen,
+    penCancel: cancelPen,
+    penPop: popPen,
+  }), [applySnapshot, refreshArrows, applyTransform, commitPen, cancelPen, popPen]);
 
   const getUV = (e: React.PointerEvent | React.MouseEvent) => {
     const canvas = canvasRef.current!;
@@ -292,6 +445,23 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
       });
       return;
     }
+    // The pen never sets `drawing`: it places anchors instead of dragging ink,
+    // and a path stays editable until you commit it.
+    if (p.tool === 'pen') {
+      const cur = penRef.current;
+      const rect = canvasRef.current!.getBoundingClientRect();
+      // Clicking the first anchor closes the loop. Measured in screen pixels,
+      // not canvas ones, because it is a click — it has to feel the same
+      // whether the view is zoomed in or out.
+      if (cur.a.length >= 2 && uvDistPx(u, v, cur.a[0].x, cur.a[0].y, rect.width) <= CLOSE_PX) {
+        setPen({ a: cur.a, closed: !cur.closed });
+        return;
+      }
+      const a = [...cur.a, { x: u, y: v, hx: 0, hy: 0 }];
+      penDrag.current = a.length - 1;
+      setPen({ a, closed: cur.closed });
+      return;
+    }
     drawing.current = true;
     // New pointer stroke: the engine clears its deposit record, so this drag
     // starts from zero no matter how many times it crosses its own path.
@@ -341,6 +511,21 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
       applyTransform();
       return;
     }
+    // Dragging straight off a fresh anchor sets its handle, the way every pen
+    // tool does: the further you pull, the longer the tangent. A click with no
+    // drag leaves the handle at zero, which means "derive it from the
+    // neighbours" — so a plain click still gives you a smooth curve.
+    if (penDrag.current !== null) {
+      const i = penDrag.current;
+      setPen((cur) => {
+        const a = cur.a.slice();
+        const p0 = a[i];
+        if (!p0) return cur;
+        a[i] = { ...p0, hx: u - p0.x, hy: v - p0.y };
+        return { a, closed: cur.closed };
+      });
+      return;
+    }
     if (!drawing.current) return;
     pending.current.push([u, v]);
   };
@@ -359,6 +544,10 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     if (panning.current) {
       panning.current = false;
       panStart.current = null;
+      return;
+    }
+    if (penDrag.current !== null) {
+      penDrag.current = null;
       return;
     }
     if (!drawing.current) return;
@@ -419,6 +608,10 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
             draggable={false}
           />
         )}
+        {/* Last, so it sits above the reference overlay: a sky texture across
+            the path you are drawing is exactly the thing you cannot draw
+            against. */}
+        <canvas ref={penCanvasRef} width={props.size} height={props.size} className="paint-pen" />
       </div>
     </div>
   );

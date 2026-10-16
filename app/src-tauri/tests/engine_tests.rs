@@ -869,6 +869,82 @@ fn first_sample_of_a_batch_uses_the_real_direction() {
 }
 
 #[test]
+fn a_batch_shaped_like_a_path_flows_along_its_own_tangent() {
+    // The pen tool adds no engine support of its own: it flattens a bezier into
+    // a polyline and hands the whole thing to `stroke`, which derives the flow
+    // from each segment's direction of travel. That only holds if one batch is
+    // treated as a continuous path — so this is the contract the pen rests on.
+    //
+    // A quarter circle is the case that proves it. Every sample has a different
+    // tangent, so if the direction came from any single chord, or from the
+    // first sample, or from the segment as a whole, the flow would come out
+    // radial or constant instead of turning with the curve.
+    let n = 256usize;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+
+    let (cx, cy, r) = (0.5f32, 0.5f32, 0.3f32);
+    let arc = |t: f32| (cx + r * t.cos(), cy + r * t.sin());
+    let pts: Vec<(f32, f32)> = (0..=24)
+        .map(|i| arc(i as f32 / 24.0 * std::f32::consts::FRAC_PI_2))
+        .collect();
+    e.stroke(&pts, 14.0, 0.9, 1.0, false, "content", 7, 1.0);
+
+    let buf = e.layer(&id).unwrap().buf.clone();
+    for t in [0.45f32, 0.9, 1.25] {
+        let (u, v) = arc(t);
+        let i = ((v * n as f32) as usize * n + (u * n as f32) as usize) * 4;
+        let vx = (128.0 - buf.data[i] as f32) / 127.0;
+        let vy = (buf.data[i + 1] as f32 - 128.0) / 127.0;
+        let len = (vx * vx + vy * vy).sqrt();
+        assert!(len > 0.8, "flow at t={t} never got deposited: len={len:.2}");
+        // Tangent of that circle at `t`, in the same (v-down) frame.
+        let (tx, ty) = (-t.sin(), t.cos());
+        let dot = (vx * tx + vy * ty) / len;
+        assert!(
+            dot > 0.9,
+            "flow at t={t} is not tangential: ({vx:.2},{vy:.2}) vs ({tx:.2},{ty:.2}), dot={dot:.2}"
+        );
+    }
+}
+
+#[test]
+fn a_path_batch_deposits_evenly_where_it_crosses_itself() {
+    // A pen path can easily cross over itself, and one path is one undo step,
+    // so the crossing must not come out twice as strong — the same rule a
+    // single brush drag gets from its stroke id.
+    let n = 128usize;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+
+    // A figure of eight through the centre, in one batch.
+    let ring = |sign: f32| -> Vec<(f32, f32)> {
+        (0..=32)
+            .map(|i| {
+                let t = i as f32 / 32.0 * std::f32::consts::PI;
+                (0.5 + sign * 0.25 * t.sin(), 0.5 - 0.25 * t.cos())
+            })
+            .collect()
+    };
+    let mut pts = ring(1.0);
+    pts.extend(ring(-1.0));
+    e.stroke(&pts, 18.0, 0.8, 0.5, false, "content", 3, 0.25);
+
+    e.composite();
+    let i = ((n / 2) * n + (n / 2)) * 4;
+    let centre = 128.0 - e.composite.data[i] as f32;
+    // Strength 0.5 at flow 0.25 must stay well under its ceiling no matter how
+    // many times the path runs through the middle.
+    let ceiling = 0.5 * 127.0;
+    assert!(
+        centre < ceiling * 0.75,
+        "self-crossing compounded the deposit: {centre:.1} of a {ceiling:.1} ceiling"
+    );
+}
+
+#[test]
 fn a_lone_point_only_paints_a_mask() {
     // A click without movement carries no direction. Inventing one is exactly
     // how the speckle bug started, so on a paint layer it is a no-op; the next

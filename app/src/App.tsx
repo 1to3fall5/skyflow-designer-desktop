@@ -17,6 +17,7 @@ type ViewMode = '2d' | 'split' | '3d';
 /** Toolbox entries. `key` is also the shortcut, so the two cannot drift. */
 const TOOLS: Array<{ tool: Tool; icon: string; label: string; key: string }> = [
   { tool: 'brush', icon: 'brush', label: '画笔', key: 'B' },
+  { tool: 'pen', icon: 'pen', label: '钢笔', key: 'P' },
   { tool: 'eraser', icon: 'eraser', label: '橡皮擦', key: 'E' },
   { tool: 'magic_wand', icon: 'wand', label: '魔棒', key: 'M' },
   { tool: 'eyedropper', icon: 'pipette', label: '吸管', key: 'I' },
@@ -155,6 +156,8 @@ export default function App() {
   // of sampling the layer you are on; 'composite' is what you actually see.
   const [sampleSource, setSampleSource] = useState<'layer' | 'composite'>('layer');
   const [magicThreshold, setMagicThreshold] = useState(20);
+  /** Mirrors the pen path down in PaintView, so the options bar can count it. */
+  const [penInfo, setPenInfo] = useState({ anchors: 0, closed: false });
 
   const [showArrows, setShowArrows] = useState(true);
   const [showFlowMap, setShowFlowMap] = useState(false);
@@ -486,9 +489,18 @@ export default function App() {
           else if (action.what === 'flowmap') setShowFlowMap((v) => !v);
           else setShowShortcuts((v) => !v);
           break;
-        case 'closeHelp': setShowShortcuts(false); break;
+        // Esc drops a pen path first. With nothing down it goes back to
+        // closing the help panel, so the key is never swallowed by a tool that
+        // is not even selected.
+        case 'closeHelp':
+          if (!paintRef.current?.penCancel()) setShowShortcuts(false);
+          break;
         case 'togglePanels': setShellHidden((v) => !v); break;
         case 'resetView': paintRef.current?.resetView(); break;
+        case 'pen':
+          if (action.op === 'commit') paintRef.current?.penCommit();
+          else paintRef.current?.penPop();
+          break;
         case 'undo': structural(api.undo()); break;
         case 'redo': structural(api.redo()); break;
         case 'brushSize': setBrushSize((s) => clamp(s + action.delta, 1, 200)); break;
@@ -1021,6 +1033,24 @@ export default function App() {
             </>
           )}
 
+          {tool === 'pen' && (
+            <>
+              <Slider label="大小" value={brushSize} min={1} max={200} step={1} onChange={setBrushSize} display={String(brushSize | 0)} />
+              <Slider label="强度" value={brushStrength} min={0.01} max={1} step={0.01} onChange={setBrushStrength}
+                title="这条路径想画到的流动强度上限。路径只画一遍，所以一笔就是到位，流量对钢笔没有意义。" />
+              <Slider label="硬度" value={brushHardness} min={0} max={1} step={0.01} onChange={setBrushHardness} />
+              <span className="ob-hint">
+                {penInfo.anchors === 0
+                  ? '点击放置锚点 · 拖动调弧度 · 点首个锚点闭合 · Enter 落笔'
+                  : `${penInfo.anchors} 个锚点${penInfo.closed ? ' · 已闭合' : ''} · Enter 落笔 · Backspace 退一个 · Esc 放弃`}
+              </span>
+              {/* The 3D view has no path overlay — see paintEnabled below. */}
+              {viewMode === '3d' && (
+                <span className="ob-hint warn">钢笔目前只在 2D / 分屏视图可用（按 1 或 2）</span>
+              )}
+            </>
+          )}
+
           {tool === 'magic_wand' && (
             <Slider label="容差" value={magicThreshold} min={1} max={100} step={1} onChange={setMagicThreshold} display={String(magicThreshold)} />
           )}
@@ -1104,6 +1134,7 @@ export default function App() {
               adjusting={adjusting}
               onStrokeEnd={() => { api.saveHistory(); void refreshThumbs(); }}
               onFillEnd={() => { api.saveHistory(); void refreshThumbs(); }}
+              onPenInfo={setPenInfo}
             />
           </div>
 
@@ -1141,7 +1172,11 @@ export default function App() {
               projection={state.projection}
               polarAngle={state.polar_angle}
               tool={tool}
-              paintEnabled={canPaint && viewMode !== '2d'}
+              // The pen is off in the 3D view: a path needs an overlay drawn in
+              // the same space as the pixels it will become, and the 3D view
+              // has no such layer — it would fall through to `onPaint`'s
+              // catch-all and behave as a brush, which is worse than nothing.
+              paintEnabled={canPaint && viewMode !== '2d' && tool !== 'pen'}
               onPaint={(u, v, lu, lv) => {
                 api.stroke([[lu, lv], [u, v]], brushSize, brushHardness, brushStrength,
                   toolRef.current === 'eraser', effTarget, stroke3d.current, brushFlow).then(applySnap);

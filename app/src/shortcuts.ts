@@ -5,7 +5,7 @@
  * dispatches the returned action.
  */
 
-export type Tool = 'brush' | 'eraser' | 'magic_wand' | 'eyedropper' | 'pan';
+export type Tool = 'brush' | 'pen' | 'eraser' | 'magic_wand' | 'eyedropper' | 'pan';
 export type ViewMode = '2d' | 'split' | '3d';
 export type BrushParam = 'size' | 'strength' | 'hardness';
 
@@ -20,6 +20,8 @@ export const NON_PAINTING_TOOLS: ReadonlySet<Tool> =
 export type Action =
   | { type: 'none' }
   | { type: 'tool'; tool: Tool }
+  /** Enter: stamp the pending pen path. Backspace: undo its last anchor. */
+  | { type: 'pen'; op: 'commit' | 'pop' }
   | { type: 'view'; mode: ViewMode }
   | { type: 'toggle'; what: 'arrows' | 'anim' | 'reference' | 'flowmap' | 'help' }
   /** Tab: collapse every panel so the canvas gets the whole window. */
@@ -92,8 +94,16 @@ export function resolveShortcut(e: KeyEventLike): Action {
 
   if (k === 'Tab') return { type: 'togglePanels' };
 
+  // Pen keys are handled before the tool letters because Enter / Backspace are
+  // not letters, and because a path in progress owns them: while anchors are
+  // down, Backspace must not mean "switch to the brush".
+  if (k === 'Enter') return { type: 'pen', op: 'commit' };
+  if (k === 'Backspace') return { type: 'pen', op: 'pop' };
+
   switch (k) {
     case 'b': return { type: 'tool', tool: 'brush' };
+    // Photoshop's letter for the pen, so the muscle memory carries over.
+    case 'p': return { type: 'tool', tool: 'pen' };
     case 'e': return { type: 'tool', tool: 'eraser' };
     case 'm': return { type: 'tool', tool: 'magic_wand' };
     // Photoshop's letters for these two, so the muscle memory carries over.
@@ -131,12 +141,13 @@ export function shouldPrevent(e: KeyEventLike): boolean {
   if (mod) return true;
   // Tab must be swallowed or the WebView walks focus into the toolbar instead
   // of hiding the panels — and focus would then eat every later shortcut.
-  return e.key === ' ' || e.key === '?' || e.key === '/' || e.key === 'Tab';
+  // Backspace would otherwise be the browser's "back".
+  return e.key === ' ' || e.key === '?' || e.key === '/' || e.key === 'Tab' || e.key === 'Backspace';
 }
 
 /** Human-readable table shared by the in-app help panel and the docs. */
 export const SHORTCUT_HELP: Array<[string, string]> = [
-  ['画笔 / 橡皮擦 / 魔棒', 'B / E / M'],
+  ['画笔 / 钢笔 / 橡皮擦 / 魔棒', 'B / P / E / M'],
   ['吸管 / 平移视图', 'I / H'],
   ['隐藏 / 显示全部面板', 'Tab'],
   ['2D 绘制 / 分屏 / 3D 预览', '1 / 2 / 3'],
@@ -149,6 +160,11 @@ export const SHORTCUT_HELP: Array<[string, string]> = [
   ['按住 Shift+F 左右拖动', '调整笔刷硬度'],
   ['按住 Ctrl+F 左右拖动', '调整笔刷强度'],
   ['笔刷大小微调', '[ / ]'],
+  ['钢笔：点击放锚点 / 拖动调弧度', '左键'],
+  ['钢笔：点首个锚点', '闭合路径'],
+  ['钢笔：落笔成流向', 'Enter'],
+  ['钢笔：删掉最后一个锚点', 'Backspace'],
+  ['钢笔：放弃整条路径', 'Esc'],
   ['撤销 / 重做', 'Ctrl+Z / Ctrl+Shift+Z'],
   ['重做', 'Ctrl+Y'],
   ['新建 / 打开', 'Ctrl+N / Ctrl+O'],

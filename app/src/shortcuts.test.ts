@@ -131,9 +131,34 @@ describe('brush sizing', () => {
   });
 });
 
+describe('pen path keys', () => {
+  it('maps Enter to committing the path', () => {
+    expect(resolveShortcut(key('Enter'))).toEqual({ type: 'pen', op: 'commit' });
+  });
+
+  it('maps Backspace to dropping the last anchor', () => {
+    expect(resolveShortcut(key('Backspace'))).toEqual({ type: 'pen', op: 'pop' });
+  });
+
+  it('maps P to the pen, Photoshop\'s letter', () => {
+    expect(resolveShortcut(key('p'))).toEqual({ type: 'tool', tool: 'pen' });
+  });
+
+  it('keeps the pen keys out of text fields', () => {
+    // Backspace in a field is editing, not path editing.
+    expect(resolveShortcut(key('Backspace', { targetTag: 'INPUT' }))).toEqual({ type: 'none' });
+    expect(resolveShortcut(key('Enter', { targetTag: 'SELECT' }))).toEqual({ type: 'none' });
+  });
+
+  it('prevents Backspace from reaching the WebView', () => {
+    // Without this it is the browser's "back".
+    expect(shouldPrevent(key('Backspace'))).toBe(true);
+  });
+});
+
 describe('unhandled keys', () => {
   it('returns none for anything else', () => {
-    for (const k of ['q', 'w', 'x', '9', 'F1', 'ArrowUp', 'Enter']) {
+    for (const k of ['q', 'w', 'x', '9', 'F1', 'ArrowUp']) {
       expect(resolveShortcut(key(k))).toEqual({ type: 'none' });
     }
   });
