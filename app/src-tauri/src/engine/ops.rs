@@ -150,6 +150,27 @@ pub fn blur(src: &Buf, radius: f32) -> Buf {
 // Brush stamping
 // ---------------------------------------------------------------------------
 
+/// The flowmap encoding of a direction, as a stamp colour.
+///
+/// One function, because three places write it — the brush, the pen path, and
+/// the obstacle disturbance — and a drift between them would mean the same
+/// angle reads as a different flow depending on which tool put it there.
+///
+/// `vx` / `vy` are a *unit* direction of travel in canvas pixels (v down).
+/// `strength` is the ceiling: how long the flow vector you are aiming at is,
+/// the same job the foreground colour does in Photoshop.
+pub fn flow_style(vx: f32, vy: f32, strength: f32) -> StampStyle {
+    let range = 127.0 * strength;
+    StampStyle {
+        r: (128.0 - vx * range).clamp(0.0, 255.0) as u8,
+        g: (128.0 + vy * range).clamp(0.0, 255.0) as u8,
+        b: 255,
+        erase: false,
+        opaque: false,
+        flow: 1.0,
+    }
+}
+
 pub struct StampStyle {
     pub r: u8,
     pub g: u8,

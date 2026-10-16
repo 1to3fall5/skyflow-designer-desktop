@@ -1,10 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import {
   autoHandle, outHandle, controlPoints, segments, cubicAt, flattenPath, uvDistPx,
-  type Anchor,
+  hitPath, nearestOnPath, translatePath, withAnchor, insertAnchor, removeAnchor,
+  withBrush, PICK_PX,
+  type Anchor, type PathData,
 } from './pen';
 
 const a = (x: number, y: number, hx = 0, hy = 0): Anchor => ({ x, y, hx, hy });
+
+const path = (anchors: Anchor[], closed = false, size = 12): PathData =>
+  ({ anchors, closed, size, hardness: 0.5, strength: 0.8 });
 
 describe('pen handles', () => {
   it('derives the end tangent from the only neighbour it has', () => {
@@ -147,5 +152,137 @@ describe('uvDistPx', () => {
     // the view is zoomed in or out.
     expect(uvDistPx(0, 0, 1, 0, 800)).toBeCloseTo(800, 6);
     expect(uvDistPx(0, 0, 0.5, 0, 800)).toBeCloseTo(400, 6);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Picking. Everything a committed path can still be asked to do starts here:
+// if the wrong part is under the pointer, editing the path is guesswork.
+// ---------------------------------------------------------------------------
+
+describe('hitPath', () => {
+  /** A 512-wide view: 7 screen pixels is ~0.0137 UV. */
+  const N = 512;
+
+  it('finds an anchor under the pointer', () => {
+    const p = path([a(0.2, 0.2), a(0.8, 0.2)]);
+    const hit = hitPath([p], 0.2, 0.2, N);
+    expect(hit).toEqual({ pi: 0, part: 'anchor', ai: 0 });
+  });
+
+  it('misses an anchor just outside the grab radius', () => {
+    const p = path([a(0.2, 0.2), a(0.8, 0.2)]);
+    // Off the line as well as along it, or the curve between the two anchors
+    // would still be under the pointer and the miss would not be a miss.
+    expect(hitPath([p], 0.2 + 0.02, 0.2 + 0.05, N)).toBeNull();
+  });
+
+  it('prefers the anchor over the curve it sits on', () => {
+    // The small, specific target first — otherwise an anchor lying on its own
+    // curve could never be grabbed.
+    const p = path([a(0.2, 0.5), a(0.8, 0.5)]);
+    const hit = hitPath([p], 0.5, 0.5, N);
+    expect(hit?.part).toBe('body');
+    const onAnchor = hitPath([p], 0.2, 0.5, N);
+    expect(onAnchor).toEqual({ pi: 0, part: 'anchor', ai: 0 });
+  });
+
+  it('finds the outgoing handle, and knows it from the mirrored one', () => {
+    const p = path([a(0.3, 0.5, 0.1, 0), a(0.7, 0.5)]);
+    expect(hitPath([p], 0.4, 0.5, N)).toEqual({ pi: 0, part: 'handle', ai: 0, sign: 1 });
+    expect(hitPath([p], 0.2, 0.5, N)).toEqual({ pi: 0, part: 'handle', ai: 0, sign: -1 });
+  });
+
+  it('reports which segment a body hit landed on, and where', () => {
+    // That is what Alt+click needs to insert an anchor in the right place
+    // rather than at the end of the list.
+    const p = path([a(0.1, 0.5), a(0.5, 0.5), a(0.9, 0.5)]);
+    const hit = hitPath([p], 0.7, 0.5, N);
+    expect(hit?.part).toBe('body');
+    expect(hit && hit.part === 'body' && hit.seg).toBe(1);
+    expect(hit && hit.part === 'body' && hit.x).toBeCloseTo(0.7, 2);
+  });
+
+  it('takes the later path when two overlap', () => {
+    // Later means drawn later, which means on top, which is the one you meant.
+    const under = path([a(0.2, 0.5), a(0.8, 0.5)]);
+    const over = path([a(0.2, 0.5), a(0.8, 0.5)]);
+    expect(hitPath([under, over], 0.5, 0.5, N)?.pi).toBe(1);
+  });
+
+  it('returns nothing on empty space', () => {
+    expect(hitPath([path([a(0.2, 0.2), a(0.8, 0.2)])], 0.5, 0.9, N)).toBeNull();
+    expect(hitPath([], 0.5, 0.5, N)).toBeNull();
+  });
+});
+
+describe('nearestOnPath', () => {
+  it('measures from the curve, not from the chord', () => {
+    // A bowed segment whose middle sits at y = 0.375 but whose chord runs along
+    // y = 0. Measuring against the chord would put the midpoint of the bow half
+    // a UV away from where it actually is.
+    const p = path([a(0.0, 0.0, 0.0, 0.5), a(1.0, 0.0, 0.0, -0.5)]);
+    const near = nearestOnPath(p, 0.5, 0.5);
+    expect(near.y).toBeCloseTo(0.375, 2);
+    expect(near.d).toBeCloseTo(0.125, 2);
+  });
+});
+
+describe('editing a committed path', () => {
+  it('translates every anchor by the same delta', () => {
+    const p = path([a(0.2, 0.2, 0.05, 0), a(0.8, 0.4)]);
+    const moved = translatePath(p, 0.1, -0.05);
+    expect(moved.anchors[0].x).toBeCloseTo(0.3, 6);
+    expect(moved.anchors[0].y).toBeCloseTo(0.15, 6);
+    expect(moved.anchors[1].x).toBeCloseTo(0.9, 6);
+    // Handles are offsets, so they travel with the anchor untouched.
+    expect(moved.anchors[0].hx).toBeCloseTo(0.05, 6);
+    expect(moved.closed).toBe(p.closed);
+  });
+
+  it('replaces one anchor without touching its neighbours', () => {
+    const p = path([a(0.2, 0.2), a(0.5, 0.5), a(0.8, 0.2)]);
+    const next = withAnchor(p, 1, { x: 0.5, y: 0.9, hx: 0.1, hy: 0 });
+    expect(next.anchors[1].y).toBeCloseTo(0.9, 6);
+    expect(next.anchors[0]).toEqual(p.anchors[0]);
+    expect(next.anchors[2]).toEqual(p.anchors[2]);
+  });
+
+  it('inserts after the segment you clicked, not at the end', () => {
+    const p = path([a(0.1, 0.5), a(0.5, 0.5), a(0.9, 0.5)]);
+    const next = insertAnchor(p, 0, 0.3, 0.5);
+    expect(next.anchors).toHaveLength(4);
+    expect(next.anchors[1].x).toBeCloseTo(0.3, 6);
+    // Smooth by default: the new anchor derives its tangent from its
+    // neighbours, so dropping it in does not kink the curve.
+    expect(next.anchors[1].hx).toBe(0);
+    expect(next.anchors[1].hy).toBe(0);
+  });
+
+  it('will not shorten a path below two anchors', () => {
+    // One anchor is not a path — it has no direction to flow along.
+    const p = path([a(0.2, 0.2), a(0.8, 0.2)]);
+    expect(removeAnchor(p, 0).anchors).toHaveLength(2);
+    const three = path([a(0.2, 0.2), a(0.5, 0.5), a(0.8, 0.2)]);
+    expect(removeAnchor(three, 1).anchors.map((n) => n.x)).toEqual([0.2, 0.8]);
+  });
+
+  it('retunes the brush without moving a single anchor', () => {
+    // The whole point of keeping the brush on the path: one stroke gets wider
+    // and the nineteen next to it do not.
+    const p = path([a(0.2, 0.2), a(0.8, 0.2)], false, 12);
+    const next = withBrush(p, { size: 60, strength: 0.4 });
+    expect(next.size).toBe(60);
+    expect(next.strength).toBeCloseTo(0.4, 6);
+    expect(next.hardness).toBeCloseTo(0.5, 6);
+    expect(next.anchors).toEqual(p.anchors);
+  });
+
+  it('grabs within PICK_PX regardless of how far the view is zoomed', () => {
+    // A click target has to feel the same at 256 as at 4096.
+    const p = path([a(0.2, 0.2), a(0.8, 0.2)]);
+    const off = (PICK_PX * 0.9) / 1024; // just inside the radius when zoomed in
+    expect(hitPath([p], 0.2, 0.2 + off, 1024)?.part).toBe('anchor');
+    expect(hitPath([p], 0.2, 0.2 + off * 4, 1024)).toBeNull();
   });
 });

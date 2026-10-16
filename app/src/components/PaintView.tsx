@@ -3,8 +3,9 @@ import { api, nextStrokeId, decodeBase64, toImageData, Snapshot } from '../api';
 import { nextCursor, shouldClearOnLeave, type CursorUV } from '../cursor';
 import { brushGradient } from '../brush';
 import {
-  CLOSE_PX, PEN_FLOW, flattenPath, uvDistPx,
-  type Anchor,
+  CLOSE_PX, flattenPath, uvDistPx, hitPath,
+  translatePath, withAnchor, insertAnchor, removeAnchor, withBrush,
+  type Anchor, type PathData, type PathBrush, type PathHit,
 } from '../pen';
 import { NON_PAINTING_TOOLS, type Tool } from '../shortcuts';
 
@@ -23,17 +24,34 @@ export interface PaintViewHandle {
   penCommit: () => boolean;
   penCancel: () => boolean;
   penPop: () => boolean;
+  /** Retune the selected path's brush. No-op with nothing selected. */
+  setPathBrush: (patch: Partial<PathBrush>) => void;
 }
 
 /** What the options bar needs to say about the path in progress. */
 export interface PenInfo {
   anchors: number;
   closed: boolean;
+  /** Index of the selected committed path, or -1 for none. */
+  sel: number;
+  /** Brush of the selected path, so the sliders can show *its* values. */
+  brush: PathBrush | null;
 }
 
 export interface PaintViewProps {
   size: number;
   tool: Tool;
+  /**
+   * The active layer's committed paths, and the layer they belong to.
+   *
+   * The overlay draws them and hit-tests against them, so they have to live
+   * here — but they are not authoritative: the engine owns them, and every edit
+   * goes out through `onPathsChange` and comes back as fresh state. `layerId`
+   * is what tells this view the layer was swapped underneath it, which is the
+   * only moment a selection can silently become wrong.
+   */
+  paths: PathData[];
+  layerId: string;
   /** Fired whenever the view scale changes, so the status bar can show it. */
   onZoom?: (scale: number) => void;
   brushSize: number;
@@ -62,6 +80,12 @@ export interface PaintViewProps {
   adjusting: React.MutableRefObject<boolean>;
   onStrokeEnd: () => void;
   onFillEnd: () => void;
+  /**
+   * Commit a new path list. `done` marks the end of a gesture: false on every
+   * frame of a drag, true once on release, which is when the caller takes a
+   * history entry and refreshes thumbnails.
+   */
+  onPathsChange?: (paths: PathData[], done: boolean) => void;
   /** Pen path changed, so the options bar can say how many anchors are down. */
   onPenInfo?: (info: PenInfo) => void;
 }
@@ -69,6 +93,84 @@ export interface PaintViewProps {
 const ARROW_SAMPLE = 128;
 
 const NO_PATH: { a: Anchor[]; closed: boolean } = { a: [], closed: false };
+
+/** A drag on a committed path. See the `edit` ref. */
+interface Edit {
+  /** Working copy; replaces `props.paths` in the overlay while dragging. */
+  paths: PathData[];
+  pi: number;
+  part: PathHit['part'];
+  ai: number;
+  sign: 1 | -1;
+  /** Pointer-down position, for absolute deltas. */
+  u0: number;
+  v0: number;
+  /** The path as it was, so every frame starts from it. */
+  orig: PathData;
+  /** Whether it actually moved — a bare click selects, it does not edit. */
+  moved: boolean;
+}
+
+/** Replace one entry of a path list. */
+function withPath(paths: PathData[], pi: number, p: PathData): PathData[] {
+  const out = paths.slice();
+  out[pi] = p;
+  return out;
+}
+
+// -- overlay painting -------------------------------------------------------
+
+/** Units are fractions of the canvas edge, so one set works at any size. */
+function strokeCurve(
+  ctx: CanvasRenderingContext2D, a: Anchor[], closed: boolean,
+  n: number, color: string, lw: number,
+) {
+  const pts = flattenPath(a, closed, n);
+  if (pts.length < 2) return;
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0] * n, pts[0][1] * n);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0] * n, pts[i][1] * n);
+  if (closed) ctx.closePath();
+  ctx.lineWidth = lw;
+  ctx.strokeStyle = color;
+  ctx.stroke();
+}
+
+function paintHandles(ctx: CanvasRenderingContext2D, a: Anchor[], n: number, lw: number) {
+  ctx.lineWidth = lw;
+  ctx.strokeStyle = 'rgba(236,236,236,.55)';
+  ctx.fillStyle = '#ececec';
+  const r = Math.max(1.5, n / 400);
+  for (const p of a) {
+    if (p.hx === 0 && p.hy === 0) continue;
+    ctx.beginPath();
+    ctx.moveTo((p.x - p.hx) * n, (p.y - p.hy) * n);
+    ctx.lineTo((p.x + p.hx) * n, (p.y + p.hy) * n);
+    ctx.stroke();
+    for (const [hx, hy] of [[p.hx, p.hy], [-p.hx, -p.hy]] as const) {
+      ctx.beginPath();
+      ctx.arc((p.x + hx) * n, (p.y + hy) * n, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+function paintAnchors(
+  ctx: CanvasRenderingContext2D, a: Anchor[], n: number, lw: number, ringFirst: boolean,
+) {
+  const sq = Math.max(3, n / 300);
+  a.forEach((p, i) => {
+    // The first anchor of an open draft is ringed: clicking it closes the
+    // path, and an affordance you cannot see is one you will not find.
+    ctx.fillStyle = ringFirst && i === 0 ? '#7cc4ff' : '#ffffff';
+    ctx.fillRect(p.x * n - sq / 2, p.y * n - sq / 2, sq, sq);
+    if (ringFirst && i === 0 && a.length > 1) {
+      ctx.lineWidth = lw;
+      ctx.strokeStyle = '#7cc4ff';
+      ctx.strokeRect(p.x * n - sq, p.y * n - sq, sq * 2, sq * 2);
+    }
+  });
+}
 
 /**
  * Ring geometry, sized imperatively so a stroke frame never re-renders React.
@@ -132,6 +234,19 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
   penRef.current = pen;
   /** Index of the anchor whose handle is being dragged, if any. */
   const penDrag = useRef<number | null>(null);
+  /** Index of the selected committed path, or -1. A ref: it only drives canvas. */
+  const sel = useRef(-1);
+  /**
+   * The gesture in progress on a *committed* path — anchor, handle, or the
+   * whole path. Holding the pre-drag copy is what makes dragging absolute
+   * rather than incremental: every frame recomputes from the original, so the
+   * path cannot drift away from where you grabbed it.
+   */
+  const edit = useRef<Edit | null>(null);
+  /** Set when `edit` moved and the engine has not seen it yet. */
+  const editDirty = useRef(false);
+  /** One round trip in flight, so a slow frame cannot land out of order. */
+  const editBusy = useRef(false);
 
   const applyTransform = useCallback(() => {
     const el = wrapRef.current;
@@ -214,6 +329,19 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
   useEffect(() => {
     const flush = () => {
       rafId.current = requestAnimationFrame(flush);
+      // Dragging a path is the same budget as dragging a brush: one round trip
+      // per frame, and never two in flight, because a slow one landing after a
+      // fast one would put last frame's anchor back on screen.
+      if (editDirty.current && edit.current && !editBusy.current) {
+        editDirty.current = false;
+        editBusy.current = true;
+        const next = edit.current.paths;
+        void Promise.resolve(propsRef.current.onPathsChange?.(next, false))
+          .finally(() => {
+            editBusy.current = false;
+            scheduleArrows();
+          });
+      }
       const q = pending.current;
       if (q.length === 0) return;
       const p = propsRef.current;
@@ -248,12 +376,16 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
   }, []);
 
   /**
-   * The path overlay: curve, anchors, and the handles you can still grab.
+   * The path overlay: committed paths, the draft, and whatever is grabbable.
    *
    * Drawn on its own canvas at the flowmap's resolution rather than as SVG over
-   * the stage, so it shares one coordinate space with the pixels it is about to
-   * become — and so it pans and zooms with them for free, exactly like the
-   * arrow overlay next to it.
+   * the stage, so it shares one coordinate space with the pixels it came from —
+   * and so it pans and zooms with them for free, exactly like the arrow overlay
+   * next to it.
+   *
+   * Only the selected path shows its anchors. Every path showing all of its
+   * anchors is a grid of squares you cannot see the curve through, and the
+   * anchors are only editable one path at a time anyway.
    */
   const drawPen = useCallback(() => {
     const c = penCanvasRef.current;
@@ -262,65 +394,71 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     if (!ctx) return;
     const n = c.width;
     ctx.clearRect(0, 0, n, n);
+    const lw = Math.max(1, n / 700);
+    const s = sel.current;
+    const paths = edit.current?.paths ?? propsRef.current.paths;
+
+    // Committed paths underneath: the draft is the thing being worked on, so it
+    // goes on top of them.
+    paths.forEach((p, pi) => {
+      const on = pi === s;
+      strokeCurve(ctx, p.anchors, p.closed, n,
+        on ? '#378ef0' : 'rgba(55,142,240,.45)', on ? lw * 1.4 : lw);
+      if (!on) return;
+      paintHandles(ctx, p.anchors, n, lw);
+      paintAnchors(ctx, p.anchors, n, lw, false);
+    });
+
     const { a, closed } = penRef.current;
     if (a.length === 0) return;
+    strokeCurve(ctx, a, closed, n, '#378ef0', lw);
+    paintHandles(ctx, a, n, lw);
+    paintAnchors(ctx, a, n, lw, true);
+  }, []);
 
-    const X = (x: number) => x * n;
-    const lw = Math.max(1, n / 700);
-
-    const pts = flattenPath(a, closed, n);
-    if (pts.length >= 2) {
-      ctx.beginPath();
-      ctx.moveTo(X(pts[0][0]), X(pts[0][1]));
-      for (let i = 1; i < pts.length; i++) ctx.lineTo(X(pts[i][0]), X(pts[i][1]));
-      if (closed) ctx.closePath();
-      ctx.lineWidth = lw;
-      ctx.strokeStyle = '#378ef0';
-      ctx.stroke();
-    }
-
-    // Handles first, so the anchors sit on top of them.
-    ctx.lineWidth = lw;
-    ctx.strokeStyle = 'rgba(236,236,236,.55)';
-    ctx.fillStyle = '#ececec';
-    for (const p of a) {
-      if (p.hx === 0 && p.hy === 0) continue;
-      ctx.beginPath();
-      ctx.moveTo(X(p.x - p.hx), X(p.y - p.hy));
-      ctx.lineTo(X(p.x + p.hx), X(p.y + p.hy));
-      ctx.stroke();
-      for (const [hx, hy] of [[p.hx, p.hy], [-p.hx, -p.hy]]) {
-        ctx.beginPath();
-        ctx.arc(X(p.x + hx), X(p.y + hy), Math.max(1.5, n / 400), 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-
-    const sq = Math.max(3, n / 300);
-    a.forEach((p, i) => {
-      // The first anchor is ringed: clicking it closes the path, and an
-      // affordance you cannot see is an affordance you will not find.
-      ctx.fillStyle = i === 0 ? '#7cc4ff' : '#ffffff';
-      ctx.fillRect(X(p.x) - sq / 2, X(p.y) - sq / 2, sq, sq);
-      if (i === 0 && a.length > 1) {
-        ctx.lineWidth = lw;
-        ctx.strokeStyle = '#7cc4ff';
-        ctx.strokeRect(X(p.x) - sq, X(p.y) - sq, sq * 2, sq * 2);
-      }
+  /** Tell the options bar what is down and what is selected. */
+  const publishPen = useCallback((over?: PathData[]) => {
+    const p = propsRef.current;
+    const paths = over ?? edit.current?.paths ?? p.paths;
+    const selPath = sel.current >= 0 ? paths[sel.current] : undefined;
+    p.onPenInfo?.({
+      anchors: penRef.current.a.length,
+      closed: penRef.current.closed,
+      sel: sel.current,
+      brush: selPath
+        ? { size: selPath.size, hardness: selPath.hardness, strength: selPath.strength }
+        : null,
     });
   }, []);
 
   useEffect(() => {
     drawPen();
-    propsRef.current.onPenInfo?.({ anchors: pen.a.length, closed: pen.closed });
-  }, [pen, props.size, drawPen]);
+    publishPen();
+  }, [pen, props.size, props.paths, drawPen, publishPen]);
 
   // A path belongs to the pen. Switching tools abandons it rather than leaving
   // an invisible one that the next Enter would stamp somewhere you forgot.
   useEffect(() => {
     penDrag.current = null;
+    penRef.current = NO_PATH;
     setPen(NO_PATH);
-  }, [props.tool]);
+    drawPen();
+    publishPen();
+  }, [props.tool, drawPen, publishPen]);
+
+  // Switching layers invalidates the selection outright: index 3 of the old
+  // layer is a different path on the new one, and silently keeping it would
+  // move geometry you cannot see.
+  useEffect(() => {
+    sel.current = -1;
+    edit.current = null;
+    editDirty.current = false;
+    penDrag.current = null;
+    penRef.current = NO_PATH;
+    setPen(NO_PATH);
+    drawPen();
+    publishPen();
+  }, [props.layerId, drawPen, publishPen]);
 
   const scheduleArrows = useCallback(() => {
     if (arrowTimer.current) return;
@@ -330,46 +468,137 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     }, 80);
   }, [refreshArrows]);
 
+  /** Send a path list to the engine. `done` ends the gesture. */
+  const pushPaths = useCallback((next: PathData[], done: boolean) => {
+    propsRef.current.onPathsChange?.(next, done);
+  }, []);
+
+  /**
+   * Move the grabbed part of a committed path.
+   *
+   * Absolute against the pre-drag copy, so the path cannot accumulate error
+   * the way "add last frame's delta" would.
+   */
+  const applyEdit = useCallback((u: number, v: number) => {
+    const e = edit.current;
+    if (!e) return;
+    const a = e.orig.anchors[e.ai];
+    let next: PathData;
+    if (e.part === 'body') {
+      next = translatePath(e.orig, u - e.u0, v - e.v0);
+    } else if (!a) {
+      return;
+    } else if (e.part === 'anchor') {
+      next = withAnchor(e.orig, e.ai, { ...a, x: a.x + (u - e.u0), y: a.y + (v - e.v0) });
+    } else if (e.sign > 0) {
+      // The outgoing handle follows the pointer directly.
+      next = withAnchor(e.orig, e.ai, { ...a, hx: u - a.x, hy: v - a.y });
+    } else {
+      // The incoming one is the mirror, so it follows it the other way round.
+      next = withAnchor(e.orig, e.ai, { ...a, hx: a.x - u, hy: a.y - v });
+    }
+    e.paths = withPath(e.paths, e.pi, next);
+    e.moved = true;
+    editDirty.current = true;
+    drawPen();
+  }, [drawPen]);
+
+  /**
+   * Enter: the draft becomes a path on the layer.
+   *
+   * Nothing is stamped. The path is *added to the layer's geometry* and the
+   * engine renders the pixels from it, which is the whole difference between
+   * this and a brush stroke: from here on the anchors can be moved and the flow
+   * follows, instead of the pixels being all that is left of your intent.
+   */
   const commitPen = useCallback(() => {
     const p = propsRef.current;
     const { a, closed } = penRef.current;
     penDrag.current = null;
+    penRef.current = NO_PATH;
     setPen(NO_PATH);
     if (a.length < 2) return false;
 
-    const pts = flattenPath(a, closed, p.size);
-    if (pts.length < 2) return false;
-
-    // One path, one stroke id, one undo step: the engine resets its deposit
-    // record when the id changes, so a path that crosses itself does not
-    // compound where it overlaps — the same rule a single drag gets.
-    strokeId.current = nextStrokeId();
-    api.stroke(pts, p.brushSize, p.brushHardness, p.brushStrength, false,
-      p.editTarget, strokeId.current, PEN_FLOW)
-      .then((s) => {
-        applySnapshot(s);
-        scheduleArrows();
-        // Same accounting as finishing a brush drag: one history entry, one
-        // thumbnail refresh.
-        propsRef.current.onStrokeEnd();
-      });
+    // The brush travels with the path. That is what lets you come back to a
+    // path later and retune *it*, and what lets one layer hold paths of twenty
+    // different widths.
+    const next = [...p.paths, {
+      anchors: a,
+      closed,
+      size: p.brushSize,
+      hardness: p.brushHardness,
+      strength: p.brushStrength,
+    }];
+    // Selected straight away, so the options bar's sliders are already talking
+    // to the thing you just made.
+    sel.current = next.length - 1;
+    drawPen();
+    publishPen(next);
+    pushPaths(next, true);
+    scheduleArrows();
     return true;
-  }, [applySnapshot, scheduleArrows]);
+  }, [drawPen, publishPen, pushPaths, scheduleArrows]);
 
   const cancelPen = useCallback(() => {
-    if (penRef.current.a.length === 0) return false;
-    penDrag.current = null;
-    setPen(NO_PATH);
-    return true;
-  }, []);
+    if (penRef.current.a.length > 0) {
+      penDrag.current = null;
+      penRef.current = NO_PATH;
+      setPen(NO_PATH);
+      drawPen();
+      publishPen();
+      return true;
+    }
+    // Nothing being drawn: Esc drops the selection. It is the other thing that
+    // reads as "get me out of this", and leaving anchors on screen after Esc
+    // would say the opposite.
+    if (sel.current >= 0) {
+      sel.current = -1;
+      drawPen();
+      publishPen();
+      return true;
+    }
+    return false;
+  }, [drawPen, publishPen]);
 
+  /**
+   * Backspace: undo the last anchor, or — with nothing down — delete the
+   * selected path.
+   *
+   * Which one it is depends on what there is to undo, not on a mode: you are
+   * always removing the last thing you did, and the draft is more recent than
+   * the selection.
+   */
   const popPen = useCallback(() => {
     const cur = penRef.current;
-    if (cur.a.length === 0) return false;
-    penDrag.current = null;
-    setPen({ a: cur.a.slice(0, -1), closed: cur.a.length > 2 ? cur.closed : false });
-    return true;
-  }, []);
+    if (cur.a.length > 0) {
+      penDrag.current = null;
+      const a = cur.a.slice(0, -1);
+      penRef.current = { a, closed: a.length > 2 ? cur.closed : false };
+      setPen(penRef.current);
+      drawPen();
+      publishPen();
+      return true;
+    }
+    const p = propsRef.current;
+    if (sel.current >= 0 && sel.current < p.paths.length) {
+      const next = p.paths.filter((_, i) => i !== sel.current);
+      sel.current = -1;
+      drawPen();
+      publishPen(next);
+      pushPaths(next, true);
+      return true;
+    }
+    return false;
+  }, [drawPen, publishPen, pushPaths]);
+
+  const setPathBrush = useCallback((patch: Partial<PathBrush>) => {
+    const p = propsRef.current;
+    const i = sel.current;
+    if (i < 0 || i >= p.paths.length) return;
+    const next = withPath(p.paths, i, withBrush(p.paths[i], patch));
+    publishPen(next);
+    pushPaths(next, true);
+  }, [publishPen, pushPaths]);
 
   useImperativeHandle(ref, () => ({
     applySnapshot,
@@ -383,7 +612,8 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     penCommit: commitPen,
     penCancel: cancelPen,
     penPop: popPen,
-  }), [applySnapshot, refreshArrows, applyTransform, commitPen, cancelPen, popPen]);
+    setPathBrush,
+  }), [applySnapshot, refreshArrows, applyTransform, commitPen, cancelPen, popPen, setPathBrush]);
 
   const getUV = (e: React.PointerEvent | React.MouseEvent) => {
     const canvas = canvasRef.current!;
@@ -401,6 +631,77 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
       if (s > 0) p.onPickStrength(s);
     });
   }, []);
+
+  /**
+   * A left press with the pen.
+   *
+   * Three different things can happen, and the order is the whole interaction:
+   * a draft in progress owns the pointer; with no draft, whatever is already on
+   * the layer is grabbed; only if neither applies does a click start a new
+   * path. Getting that backwards would mean you could never select a path,
+   * because every click would begin another one on top of it.
+   */
+  const penDown = useCallback((u: number, v: number, alt: boolean) => {
+    const p = propsRef.current;
+    // Screen pixels, so the grab radius feels the same zoomed in or out.
+    const sizePx = canvasRef.current?.getBoundingClientRect().width ?? p.size;
+    const cur = penRef.current;
+
+    if (cur.a.length >= 2 && uvDistPx(u, v, cur.a[0].x, cur.a[0].y, sizePx) <= CLOSE_PX) {
+      penRef.current = { a: cur.a, closed: !cur.closed };
+      setPen(penRef.current);
+      drawPen();
+      publishPen();
+      return;
+    }
+
+    if (cur.a.length === 0) {
+      const hit = hitPath(p.paths, u, v, sizePx);
+      if (hit) {
+        sel.current = hit.pi;
+        const base = p.paths[hit.pi];
+        if (alt && hit.part === 'anchor') {
+          // Alt + anchor deletes it. The path stays smooth: the anchors either
+          // side re-derive their tangents from their new neighbours.
+          const next = withPath(p.paths, hit.pi, removeAnchor(base, hit.ai));
+          publishPen(next);
+          pushPaths(next, true);
+        } else if (alt && hit.part === 'body') {
+          // Alt + curve adds one, which is how "keep editing this" works once a
+          // path is committed — the alternative is deleting it and starting
+          // over, which throws away the shape you were trying to refine.
+          const next = withPath(p.paths, hit.pi, insertAnchor(base, hit.seg, hit.x, hit.y));
+          publishPen(next);
+          pushPaths(next, true);
+        } else {
+          edit.current = {
+            paths: p.paths,
+            pi: hit.pi,
+            part: hit.part,
+            ai: hit.part === 'body' ? -1 : hit.ai,
+            sign: hit.part === 'handle' ? hit.sign : 1,
+            u0: u,
+            v0: v,
+            orig: base,
+            moved: false,
+          };
+        }
+        drawPen();
+        publishPen();
+        return;
+      }
+      // Empty space with nothing drawn: start a path, and drop the selection —
+      // clicking away from a path is how you say you are finished with it.
+      sel.current = -1;
+    }
+
+    const a = [...cur.a, { x: u, y: v, hx: 0, hy: 0 }];
+    penRef.current = { a, closed: cur.closed };
+    setPen(penRef.current);
+    penDrag.current = a.length - 1;
+    drawPen();
+    publishPen();
+  }, [drawPen, publishPen, pushPaths]);
 
   const onPointerDown = (e: React.PointerEvent) => {
     const p = propsRef.current;
@@ -421,6 +722,14 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     }
     if (e.button !== 0) return;
     const { u, v } = getUV(e);
+    // The pen is tested *before* the Alt eyedropper, because with a pen Alt
+    // means "this anchor, here" — add or remove one — which is what Alt does to
+    // a path in Photoshop. The eyedropper is one key away and stickier, so
+    // losing the modifier here costs nothing.
+    if (p.tool === 'pen') {
+      penDown(u, v, e.altKey);
+      return;
+    }
     // Alt = eyedropper, whatever tool is selected. Temporary: it is a modifier,
     // so releasing it returns to the tool on its own. Selecting the eyedropper
     // itself makes it stick for the whole drag.
@@ -443,23 +752,6 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
         scheduleArrows();
         p.onFillEnd();
       });
-      return;
-    }
-    // The pen never sets `drawing`: it places anchors instead of dragging ink,
-    // and a path stays editable until you commit it.
-    if (p.tool === 'pen') {
-      const cur = penRef.current;
-      const rect = canvasRef.current!.getBoundingClientRect();
-      // Clicking the first anchor closes the loop. Measured in screen pixels,
-      // not canvas ones, because it is a click — it has to feel the same
-      // whether the view is zoomed in or out.
-      if (cur.a.length >= 2 && uvDistPx(u, v, cur.a[0].x, cur.a[0].y, rect.width) <= CLOSE_PX) {
-        setPen({ a: cur.a, closed: !cur.closed });
-        return;
-      }
-      const a = [...cur.a, { x: u, y: v, hx: 0, hy: 0 }];
-      penDrag.current = a.length - 1;
-      setPen({ a, closed: cur.closed });
       return;
     }
     drawing.current = true;
@@ -511,6 +803,12 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
       applyTransform();
       return;
     }
+    // A committed path is being dragged: an anchor, a handle, or the whole
+    // thing. Comes first because it is the most specific thing a drag can mean.
+    if (edit.current) {
+      applyEdit(u, v);
+      return;
+    }
     // Dragging straight off a fresh anchor sets its handle, the way every pen
     // tool does: the further you pull, the longer the tangent. A click with no
     // drag leaves the handle at zero, which means "derive it from the
@@ -544,6 +842,16 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     if (panning.current) {
       panning.current = false;
       panStart.current = null;
+      return;
+    }
+    if (edit.current) {
+      const e = edit.current;
+      edit.current = null;
+      editDirty.current = false;
+      // A click that never moved only selected; sending it would be a history
+      // entry and a thumbnail refresh for nothing.
+      if (e.moved) pushPaths(e.paths, true);
+      drawPen();
       return;
     }
     if (penDrag.current !== null) {

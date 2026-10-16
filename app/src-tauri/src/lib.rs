@@ -32,6 +32,7 @@ pub fn run() {
             commands::redo,
             commands::update_layer,
             commands::add_layer,
+            commands::set_paths,
             commands::remove_layer,
             commands::reorder,
             commands::set_active,

@@ -6,6 +6,7 @@ use tauri::{Manager, State};
 
 use crate::engine::io;
 use crate::engine::ops::Projection;
+use crate::engine::path::PathData;
 use crate::engine::{Engine, LayerKind};
 
 pub struct AppState {
@@ -29,6 +30,9 @@ pub struct LayerInfo {
     pub disturbance_enabled: bool,
     pub disturbance: f32,
     pub has_mask: bool,
+    /// The layer's pen paths. The frontend renders and edits these, so they
+    /// have to travel with every snapshot — undo and redo move them too.
+    pub paths: Vec<PathData>,
 }
 
 #[derive(Serialize)]
@@ -131,6 +135,7 @@ fn layer_info(l: &crate::engine::LayerData) -> LayerInfo {
             LayerKind::Paint => "paint",
             LayerKind::Wind => "wind",
             LayerKind::Obstacle => "obstacle",
+            LayerKind::Path => "path",
         }
         .into(),
         visible: l.p.visible,
@@ -141,6 +146,7 @@ fn layer_info(l: &crate::engine::LayerData) -> LayerInfo {
         disturbance_enabled: l.p.disturbance_enabled,
         disturbance: l.p.disturbance,
         has_mask: l.p.has_mask,
+        paths: l.paths.clone(),
     }
 }
 
@@ -382,9 +388,25 @@ pub fn add_layer(kind: String, state: State<AppState>) -> Snapshot {
     let k = match kind.as_str() {
         "wind" => LayerKind::Wind,
         "obstacle" => LayerKind::Obstacle,
+        "path" => LayerKind::Path,
         _ => LayerKind::Paint,
     };
     state.engine.lock().unwrap().add_layer(k);
+    emit(&state)
+}
+
+/// Replace a path layer's paths.
+///
+/// The whole list goes over every time because it *is* the layer's content and
+/// it is small: a handful of anchors, not pixels. The engine diffs it against
+/// what it had and re-renders only the paths that moved.
+///
+/// The caller is responsible for `save_history` — one edit is one undo step,
+/// and the frontend knows where an edit begins and ends (a drag does not want
+/// forty history entries).
+#[tauri::command]
+pub fn set_paths(id: String, paths: Vec<PathData>, state: State<AppState>) -> Snapshot {
+    state.engine.lock().unwrap().set_paths(&id, paths);
     emit(&state)
 }
 

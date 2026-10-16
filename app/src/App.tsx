@@ -1,10 +1,11 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { open, save, message } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { api, nextStrokeId, AppState, LayerInfo, LayerKind, Snapshot } from './api';
+import type { PathData, PathBrush } from './pen';
 import { resolveShortcut, shouldPrevent, SHORTCUT_HELP, type BrushParam, type Tool } from './shortcuts';
 import type { CursorUV } from './cursor';
-import PaintView, { PaintViewHandle } from './components/PaintView';
+import PaintView, { PaintViewHandle, type PenInfo } from './components/PaintView';
 import Preview3D, { Preview3DHandle } from './components/Preview3D';
 import { ToolIcon } from './icons';
 import AppBar from './AppBar';
@@ -119,6 +120,7 @@ const START_COLLAPSED: Record<string, boolean> = { document: true, export: true 
 
 const KIND_META: Record<LayerKind, { label: string; color: string }> = {
   paint: { label: '流向', color: '#10b981' },
+  path: { label: '路径', color: '#378ef0' },
   wind: { label: '风向', color: '#8b5cf6' },
   obstacle: { label: '障碍物', color: '#f43f5e' },
 };
@@ -132,11 +134,18 @@ const KIND_META: Record<LayerKind, { label: string; color: string }> = {
  */
 const PARAM_SECT: Record<LayerKind, string> = {
   paint: '笔迹',
+  path: '路径',
   wind: '风场',
   obstacle: '绕流',
 };
 
+/** Kinds whose pixels come from parameters, so painting one edits its mask. */
+const GENERATED: ReadonlySet<LayerKind> = new Set<LayerKind>(['wind', 'obstacle']);
+
 const RESOLUTIONS = [512, 1024, 2048, 4096];
+
+/** Shared empty path list, so "no paths" keeps one identity across renders. */
+const EMPTY_PATHS: PathData[] = [];
 
 export default function App() {
   const [state, setState] = useState<AppState | null>(null);
@@ -157,7 +166,7 @@ export default function App() {
   const [sampleSource, setSampleSource] = useState<'layer' | 'composite'>('layer');
   const [magicThreshold, setMagicThreshold] = useState(20);
   /** Mirrors the pen path down in PaintView, so the options bar can count it. */
-  const [penInfo, setPenInfo] = useState({ anchors: 0, closed: false });
+  const [penInfo, setPenInfo] = useState<PenInfo>({ anchors: 0, closed: false, sel: -1, brush: null });
 
   const [showArrows, setShowArrows] = useState(true);
   const [showFlowMap, setShowFlowMap] = useState(false);
@@ -449,6 +458,79 @@ export default function App() {
     void refreshThumbs();
   }, [applyUpdate, refreshThumbs]);
 
+  /**
+   * Replace the active path layer's geometry.
+   *
+   * `done` is the gesture boundary. Dragging an anchor calls this every frame
+   * with false — the engine re-renders just the paths that moved, so it keeps
+   * up — and once with true on release, which is the only moment that earns a
+   * history entry and a thumbnail.
+   */
+  const changePaths = useCallback(async (paths: PathData[], done: boolean) => {
+    const st = stateRef.current;
+    if (!st) return;
+    const cur = st.layers.find((l) => l.id === st.active);
+    let id = st.active;
+    // Guard, not a switch you have to remember: if the pen ends up aimed at a
+    // layer that stores pixels, the edit lands on a path layer anyway. Silently
+    // dropping it — the alternative — is a tool that stops working for a reason
+    // nothing on screen explains.
+    if (!cur || cur.kind !== 'path') {
+      const top = [...st.layers].reverse().find((l) => l.kind === 'path');
+      if (top) {
+        id = top.id;
+        setState(await api.setActive(id));
+      } else {
+        const snap = await api.addLayer('path');
+        applyUpdate(snap);
+        id = snap.state.active;
+      }
+    }
+    applyUpdate(await api.setPaths(id, paths));
+    if (done) {
+      api.saveHistory();
+      void refreshThumbs();
+    }
+  }, [applyUpdate, refreshThumbs]);
+
+  /**
+   * The pen brings its own layer.
+   *
+   * A path cannot live on a paint layer — those store pixels, and pixels are
+   * the one thing a path must not be reduced to, because then it stops being
+   * editable. Rather than refuse to draw (or bake it in and call it done), the
+   * pen reuses the topmost path layer, or makes one. Substance Painter does the
+   * same: the tool you pick decides what kind of layer you get.
+   */
+  useEffect(() => {
+    if (tool !== 'pen') return;
+    const st = stateRef.current;
+    if (!st) return;
+    const cur = st.layers.find((l) => l.id === st.active);
+    if (cur?.kind === 'path') return;
+    const top = [...st.layers].reverse().find((l) => l.kind === 'path');
+    if (top) void api.setActive(top.id).then(setState);
+    else void structural(api.addLayer('path'));
+  }, [tool, structural]);
+
+  /**
+   * One pen slider.
+   *
+   * With a path selected it retunes that path; with nothing selected it sets
+   * the brush the *next* path will be drawn with. Same three sliders, two
+   * targets — decided by what is selected rather than by a mode, because a mode
+   * is a thing you have to remember to leave.
+   */
+  const tunePen = (key: keyof PathBrush, v: number) => {
+    if (penInfo.sel >= 0) {
+      paintRef.current?.setPathBrush({ [key]: v } as Partial<PathBrush>);
+      return;
+    }
+    if (key === 'size') setBrushSize(v);
+    else if (key === 'strength') setBrushStrength(v);
+    else setBrushHardness(v);
+  };
+
   // ---------------------------------------------------------------------
   // shortcuts
   const brushAdjust = useRef<{ param: BrushParam; x: number; moved: number; t: number } | null>(null);
@@ -585,6 +667,14 @@ export default function App() {
   // the reverse — every index used here is a *visual* index.
   const layers = state?.layers ? [...state.layers].reverse() : [];
   const activeLayer = state?.layers.find((l) => l.id === state.active);
+  /**
+   * The active layer's paths, identity-stable.
+   *
+   * Not `activeLayer?.paths ?? []` inline: that is a fresh array on every
+   * render, and PaintView redraws whenever this identity changes — which would
+   * mean a redraw (and a message back up here) on every render, forever.
+   */
+  const activePaths = useMemo(() => activeLayer?.paths ?? EMPTY_PATHS, [activeLayer]);
   const activeRow = layers.findIndex((l) => l.id === state?.active);
   const canMoveUp = activeRow > 0;
   const canMoveDown = activeRow >= 0 && activeRow < layers.length - 1;
@@ -596,7 +686,10 @@ export default function App() {
   };
 
   const skyUrl = refSrc;
-  const isAdj = activeLayer ? activeLayer.kind !== 'paint' : false;
+  // A path layer is painted *onto* like a paint layer — it just happens to
+  // remember the geometry instead of the pixels. Only the generated kinds
+  // (wind / obstacle) have no content of their own to paint into.
+  const isAdj = activeLayer ? GENERATED.has(activeLayer.kind) : false;
 
   // ---- workspace split ----
   const workspaceRef = useRef<HTMLDivElement>(null);
@@ -655,6 +748,7 @@ export default function App() {
       case 'view.3d': setViewMode('3d'); break;
 
       case 'layer.paint': structural(api.addLayer('paint')); break;
+      case 'layer.path': structural(api.addLayer('path')); break;
       case 'layer.wind': structural(api.addLayer('wind')); break;
       case 'layer.obstacle': structural(api.addLayer('obstacle')); break;
       case 'layer.up': moveActive(-1); break;
@@ -747,6 +841,13 @@ export default function App() {
               画到下层遮罩上就会在遮罩处盖住下面的图层。
             </p>
           )}
+          {activeLayer.kind === 'path' && (
+            <p className="note">
+              这一层的像素是由路径算出来的，不是笔迹：锚点可以随时拖动、手柄可以随时
+              弯、整条路径可以随时挪走，像素跟着重算。选中一条路径后，顶部选项栏的
+              大小 / 强度 / 硬度就是它自己的笔刷。
+            </p>
+          )}
           {activeLayer.kind === 'wind' && (
             <>
               <Row label="方向" value={`${activeLayer.direction | 0}°`}>
@@ -803,6 +904,10 @@ export default function App() {
             guess. */}
         <div className="layer-bar bleed">
           <IconBtn icon="brush" title="新建流向图层" onClick={() => structural(api.addLayer('paint'))} />
+          {/* Second, right after 流向: a path layer is what the pen draws on,
+              and the toolbar is where you go looking for one. */}
+          <IconBtn icon="pen" title="新建路径图层（钢笔画的锚点存在这里，可反复调整）"
+            onClick={() => structural(api.addLayer('path'))} />
           <IconBtn icon="wind" title="新建风向图层" onClick={() => structural(api.addLayer('wind'))} />
           <IconBtn icon="box" title="新建障碍图层" onClick={() => structural(api.addLayer('obstacle'))} />
           <span className="bar-sep" />
@@ -858,7 +963,7 @@ export default function App() {
 
                 <span className="ellipsis name">{l.name}</span>
 
-                {l.kind !== 'paint' && active && (
+                {GENERATED.has(l.kind) && active && (
                   // Not a toggle: painting an adjustment layer always edits its
                   // mask. A "参数/遮罩" switch here could silently eat brush
                   // strokes, which is exactly the bug it caused.
@@ -1035,14 +1140,27 @@ export default function App() {
 
           {tool === 'pen' && (
             <>
-              <Slider label="大小" value={brushSize} min={1} max={200} step={1} onChange={setBrushSize} display={String(brushSize | 0)} />
-              <Slider label="强度" value={brushStrength} min={0.01} max={1} step={0.01} onChange={setBrushStrength}
+              {/* With a path selected these three describe *that path*, not the
+                  brush you would draw the next one with — which is the whole
+                  substance of "non-destructive": the stroke keeps its own
+                  settings and you can retune it after the fact. */}
+              <Slider label="大小" value={penInfo.brush?.size ?? brushSize} min={1} max={200} step={1}
+                onChange={(v) => tunePen('size', v)} display={String((penInfo.brush?.size ?? brushSize) | 0)} />
+              <Slider label="强度" value={penInfo.brush?.strength ?? brushStrength} min={0.01} max={1} step={0.01}
+                onChange={(v) => tunePen('strength', v)}
                 title="这条路径想画到的流动强度上限。路径只画一遍，所以一笔就是到位，流量对钢笔没有意义。" />
-              <Slider label="硬度" value={brushHardness} min={0} max={1} step={0.01} onChange={setBrushHardness} />
+              <Slider label="硬度" value={penInfo.brush?.hardness ?? brushHardness} min={0} max={1} step={0.01}
+                onChange={(v) => tunePen('hardness', v)} />
+              {penInfo.sel >= 0 && (
+                <button className="ob-btn" title="删除选中的路径（Backspace）"
+                  onClick={() => paintRef.current?.penPop()}>删除路径</button>
+              )}
               <span className="ob-hint">
-                {penInfo.anchors === 0
-                  ? '点击放置锚点 · 拖动调弧度 · 点首个锚点闭合 · Enter 落笔'
-                  : `${penInfo.anchors} 个锚点${penInfo.closed ? ' · 已闭合' : ''} · Enter 落笔 · Backspace 退一个 · Esc 放弃`}
+                {penInfo.anchors > 0
+                  ? `${penInfo.anchors} 个锚点${penInfo.closed ? ' · 已闭合' : ''} · Enter 落笔 · Backspace 退一个 · Esc 放弃`
+                  : penInfo.sel >= 0
+                    ? '拖动锚点改形状 · 拖手柄改弧度 · 拖线身整体移动 · Alt+锚点删除 · Alt+线身加锚点'
+                    : '点击放置锚点 · 拖动调弧度 · 点首个锚点闭合 · Enter 落笔 · 点已有路径可选中重编'}
               </span>
               {/* The 3D view has no path overlay — see paintEnabled below. */}
               {viewMode === '3d' && (
@@ -1115,6 +1233,9 @@ export default function App() {
               ref={paintRef}
               size={state.size}
               tool={tool}
+              paths={activePaths}
+              layerId={state.active}
+              onPathsChange={changePaths}
               brushSize={brushSize}
               brushHardness={brushHardness}
               brushStrength={brushStrength}

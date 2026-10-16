@@ -24,7 +24,7 @@ export type MenuCmd =
   | 'view.reference' | 'view.flowmap' | 'view.arrows' | 'view.anim' | 'view.panels'
   | 'view.2d' | 'view.split' | 'view.3d'
   // 图层
-  | 'layer.paint' | 'layer.wind' | 'layer.obstacle'
+  | 'layer.paint' | 'layer.path' | 'layer.wind' | 'layer.obstacle'
   | 'layer.up' | 'layer.down' | 'layer.delete'
   // 帮助
   | 'help.shortcuts';
@@ -134,6 +134,7 @@ export function buildMenus(recent: string[]): MenuSpec[] {
       label: '图层',
       items: [
         item('新建流向图层', 'layer.paint'),
+        item('新建路径图层', 'layer.path'),
         item('新建风向图层', 'layer.wind'),
         item('新建障碍图层', 'layer.obstacle'),
         sep,

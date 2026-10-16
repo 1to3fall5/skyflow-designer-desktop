@@ -15,6 +15,7 @@ import rawSrc from './App.tsx?raw';
 import rawPaintView from './components/PaintView.tsx?raw';
 import rawPreview3D from './components/Preview3D.tsx?raw';
 import rawPen from './pen?raw';
+import rawApi from './api?raw';
 import rawShortcuts from './shortcuts?raw';
 import rawIcons from './icons?raw';
 // Vite's CSS plugin turns `styles.css?raw` into an empty string, so read
@@ -44,6 +45,10 @@ const STRUCTURAL = [
   'redo',
   'newProject',
   'loadProject',
+  // Rewriting a layer's geometry also rewrites its thumbnail, its undo entry
+  // and what the overlay is allowed to show; routing it through applySnap
+  // would leave React editing a path list the engine had already replaced.
+  'setPaths',
 ];
 
 /** Commands that may bypass state: they only move paint pixels. */
@@ -454,28 +459,38 @@ describe('the pen: a path whose tangent is the flow direction', () => {
   });
 
   it('closes a loop by clicking the first anchor', () => {
-    expect(rawPaintView).toMatch(/uvDistPx\(u, v, cur\.a\[0\]\.x, cur\.a\[0\]\.y, rect\.width\) <= CLOSE_PX/);
+    expect(rawPaintView).toMatch(/uvDistPx\(u, v, cur\.a\[0\]\.x, cur\.a\[0\]\.y, sizePx\) <= CLOSE_PX/);
     // In screen pixels, not canvas ones: it is a click, so it has to feel the
     // same whether the view is zoomed in or out.
     expect(rawPen).toMatch(/export const CLOSE_PX = 10;/);
   });
 
-  it('commits the whole path as one stroke and one undo step', () => {
-    // One `stroke` call, one stroke id, one `saveHistory`. A path is a single
-    // deliberate act, so it must undo as one.
-    expect(rawPaintView).toMatch(/strokeId\.current = nextStrokeId\(\);/);
-    expect(rawPaintView).toMatch(/api\.stroke\(pts, p\.brushSize, p\.brushHardness, p\.brushStrength, false,/);
-    expect(rawPaintView).toMatch(/propsRef\.current\.onStrokeEnd\(\);/);
-    // Flow is pinned at 1: a path is drawn once, so the brush's flow would
-    // leave it at a fraction of the strength asked for with no way to finish.
-    expect(rawPen).toMatch(/export const PEN_FLOW = 1;/);
-    expect(rawPaintView).toMatch(/strokeId\.current, PEN_FLOW\)/);
+  it('commits geometry, not pixels', () => {
+    // The whole non-destructive contract: Enter adds a PathData to the layer
+    // and the engine renders it. Stamping a polyline would leave pixels that
+    // no longer know where their anchors were.
+    // The draft used to be flattened into a stamping polyline here; now the
+    // anchors go out whole and the engine does the rasterising.
+    expect(paintView).not.toMatch(/flattenPath\(a, closed, p\.size\)/);
+    expect(rawPaintView).toMatch(/const next = \[\.\.\.p\.paths, \{/);
+    expect(rawPaintView).toMatch(/anchors: a,/);
+    expect(rawPaintView).toMatch(/pushPaths\(next, true\);/);
+    // And one history entry per path, not per sample.
+    expect(src).toMatch(/if \(done\) \{\s*\n\s*api\.saveHistory\(\);/);
+  });
+
+  it('travels with the brush it was drawn with', () => {
+    // Otherwise "make this one stroke wider" means redrawing it by hand: the
+    // brush is part of the object, not an accident of what the slider was at.
+    expect(rawPaintView).toMatch(/size: p\.brushSize,/);
+    expect(rawPaintView).toMatch(/hardness: p\.brushHardness,/);
+    expect(rawPaintView).toMatch(/strength: p\.brushStrength,/);
   });
 
   it('abandons the path when you leave the tool', () => {
     // Otherwise an invisible path sits there for the next Enter to stamp
     // somewhere you have forgotten about.
-    expect(rawPaintView).toMatch(/\}, \[props\.tool\]\);/);
+    expect(rawPaintView).toMatch(/\}, \[props\.tool, drawPen, publishPen\]\);/);
     expect(rawPaintView).toMatch(/setPen\(NO_PATH\);/);
   });
 
@@ -500,7 +515,7 @@ describe('the pen: a path whose tangent is the flow direction', () => {
     // registered at all.
     expect(src).toMatch(/onPenInfo=\{setPenInfo\}/);
     expect(src).toMatch(/\$\{penInfo\.anchors\} 个锚点/);
-    expect(rawPaintView).toMatch(/propsRef\.current\.onPenInfo\?\.\(\{ anchors: pen\.a\.length, closed: pen\.closed \}\);/);
+    expect(rawPaintView).toMatch(/anchors: penRef\.current\.a\.length,/);
   });
 
   it('draws the path on its own overlay, in the same space as the pixels', () => {
@@ -508,6 +523,92 @@ describe('the pen: a path whose tangent is the flow direction', () => {
     // zooms with the artwork for free, the way the arrow overlay already does.
     expect(rawPaintView).toMatch(/<canvas ref=\{penCanvasRef\} width=\{props\.size\} height=\{props\.size\} className="paint-pen" \/>/);
     expect(rawStyles).toMatch(/\.paint-pen \{ position: absolute; inset: 0;/);
+  });
+});
+
+/**
+ * The pen is a Substance-Painter tool, not a Photoshop one: a stroke has to
+ * stay editable after it lands.
+ *
+ * That is the difference between "a path" and "a stroke that happened to be
+ * straight". These assert the pieces that make it true — the anchors outlive
+ * the commit, the engine owns them, and every edit goes back as geometry.
+ */
+describe('the pen: a path stays editable after it lands', () => {
+  it('grabs what is on the layer before starting a new path', () => {
+    // Order is the whole interaction. A click that always began a new path
+    // would bury the old one under drafts and make it unselectable.
+    expect(paintView).toMatch(/if \(cur\.a\.length === 0\) \{\s*\n\s*const hit = hitPath\(p\.paths, u, v, sizePx\);/);
+    // Only when nothing is hit does a click drop a fresh anchor.
+    expect(paintView).toMatch(/sel\.current = -1;\s*\}\s*\n\s*const a = \[\.\.\.cur\.a,/);
+  });
+
+  it('drags against the pre-drag copy, not the last frame', () => {
+    // Incremental deltas accumulate rounding and, worse, drift if a frame is
+    // dropped. Absolute means the path is exactly where you put it.
+    expect(paintView).toMatch(/orig: base,/);
+    expect(paintView).toMatch(/translatePath\(e\.orig, u - e\.u0, v - e\.v0\)/);
+    expect(paintView).toMatch(/x: a\.x \+ \(u - e\.u0\), y: a\.y \+ \(v - e\.v0\)/);
+  });
+
+  it('sends one round trip per frame while dragging', () => {
+    // Dragging an anchor is the same budget as dragging a brush. Two in flight
+    // would let a slow reply land after a fast one and put the old anchor back.
+    expect(paintView).toMatch(/editBusy\.current = true;/);
+    expect(paintView).toMatch(/onPathsChange\?\.\(next, false\)/);
+  });
+
+  it('only takes a history entry when the gesture ends', () => {
+    // A click that never moved only selected the path; recording it would put
+    // a no-op into the undo stack for every time you touched the artwork.
+    expect(paintView).toMatch(/if \(e\.moved\) pushPaths\(e\.paths, true\);/);
+  });
+
+  it('Alt adds an anchor to the curve and removes one from it', () => {
+    // "Keep editing this" without deleting it and starting over, which throws
+    // away the shape you were trying to refine.
+    expect(paintView).toMatch(/insertAnchor\(base, hit\.seg, hit\.x, hit\.y\)/);
+    expect(paintView).toMatch(/removeAnchor\(base, hit\.ai\)/);
+  });
+
+  it('Backspace deletes the selected path when nothing is down', () => {
+    // The key always removes the most recent thing you did, and the draft is
+    // more recent than the selection.
+    expect(paintView).toMatch(/p\.paths\.filter\(\(_, i\) => i !== sel\.current\)/);
+  });
+
+  it('retunes the selected path from the options bar', () => {
+    // The decisive test of non-destructive: the stroke keeps its own brush, so
+    // you can widen path 3 without redrawing it or disturbing path 4.
+    expect(src).toMatch(/paintRef\.current\?\.setPathBrush\(\{ \[key\]: v \}/);
+    expect(paintView).toMatch(/withBrush\(p\.paths\[i\], patch\)/);
+    // Sliders read the selected path's values, not the global brush's.
+    expect(src).toMatch(/penInfo\.brush\?\.size \?\? brushSize/);
+  });
+
+  it('brings its own layer, because a path cannot live on a paint layer', () => {
+    // Pixels are the one thing a path must not be reduced to. Rather than
+    // refuse to draw, the pen reuses the topmost path layer or makes one.
+    expect(src).toMatch(/if \(tool !== 'pen'\) return;/);
+    expect(src).toMatch(/void structural\(api\.addLayer\('path'\)\);/);
+  });
+
+  it('hands the geometry to the engine and takes the state back', () => {
+    expect(rawApi).toMatch(/invoke<Snapshot>\('set_paths'/);
+    expect(src).toMatch(/applyUpdate\(await api\.setPaths\(id, paths\)\);/);
+  });
+
+  it('carries the paths on the layer itself', () => {
+    // The overlay hit-tests against them, so they have to arrive with the rest
+    // of the layer rather than in a side channel that can go stale.
+    expect(rawApi).toMatch(/paths: PathData\[\];/);
+    expect(src).toMatch(/paths=\{activePaths\}/);
+  });
+
+  it('drops the selection when the layer changes', () => {
+    // Index 3 of the old layer is a different path on the new one, and keeping
+    // it would move geometry you cannot see.
+    expect(paintView).toMatch(/\}, \[props\.layerId, drawPen, publishPen\]\);/);
   });
 });
 

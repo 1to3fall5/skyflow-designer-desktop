@@ -18,6 +18,30 @@
  * without a browser.
  */
 
+/**
+ * A committed path.
+ *
+ * The whole point of the pen: *this* is the object, and the pixels are only a
+ * rendering of it. Keeping the anchors (and the brush they were drawn with)
+ * around after the path is stamped is what makes it revisable — move an anchor
+ * a week later and the flow re-renders, instead of you having to erase and
+ * draw it again by hand and hope the second attempt matches.
+ *
+ * Mirrors `engine::path::PathData` field for field; the engine rasterises from
+ * its copy and this one draws the overlay, so they must not drift.
+ */
+export interface PathData {
+  anchors: Anchor[];
+  closed: boolean;
+  /** Brush radius in canvas pixels. */
+  size: number;
+  hardness: number;
+  strength: number;
+}
+
+/** The brush part of a path — what you can still change after committing. */
+export type PathBrush = Pick<PathData, 'size' | 'hardness' | 'strength'>;
+
 /** An anchor, plus the offset of its outgoing handle. */
 export interface Anchor {
   x: number;
@@ -40,17 +64,6 @@ export type Cubic = [[number, number], [number, number], [number, number], [numb
 
 /** How close, in screen pixels, a click has to be to the first anchor to close. */
 export const CLOSE_PX = 10;
-
-/**
- * A committed path is one pass, so flow is 1.
- *
- * `flow` is how much of the remaining distance to `strength` a single stroke
- * covers — a brush setting, because a brush goes over the same place repeatedly
- * while you scrub. A pen path is drawn once, deliberately; leaving it at the
- * brush's flow would make a path come out at a fraction of the strength you
- * asked for, with no way to get the rest except drawing it again.
- */
-export const PEN_FLOW = 1;
 
 /** Samples are this far apart on a path of ordinary length. */
 const STEP_PX = 1.5;
@@ -175,4 +188,131 @@ export function flattenPath(a: Anchor[], closed: boolean, size: number): Array<[
 /** Distance between two UV points in pixels, on a view `sizePx` wide. */
 export function uvDistPx(ax: number, ay: number, bx: number, by: number, sizePx: number): number {
   return Math.hypot((ax - bx) * sizePx, (ay - by) * sizePx);
+}
+
+// ---------------------------------------------------------------------------
+// Picking — which part of which path is under the pointer
+// ---------------------------------------------------------------------------
+
+/**
+ * How close, in screen pixels, the pointer has to be to grab something.
+ *
+ * Screen, not canvas: an anchor has to be as easy to hit zoomed out as zoomed
+ * in, and it is a click target like any other.
+ */
+export const PICK_PX = 7;
+
+export type PathHit =
+  | { pi: number; part: 'anchor'; ai: number }
+  /** `sign` is which of the anchor's two handles: +1 the outgoing one. */
+  | { pi: number; part: 'handle'; ai: number; sign: 1 | -1 }
+  | { pi: number; part: 'body'; seg: number; x: number; y: number };
+
+/** Where a UV point is relative to a path: distance, segment, nearest point. */
+export function nearestOnPath(
+  p: PathData, u: number, v: number,
+): { d: number; seg: number; x: number; y: number } {
+  const segs = segments(p.anchors, p.closed);
+  let best = { d: Infinity, seg: 0, x: u, y: v };
+  if (segs.length === 0) return best;
+  // Hit-testing resolution is fixed: the question "is the pointer on this
+  // curve" does not get more accurate on a bigger canvas, and flattening at
+  // 4096 for every pointer move would be absurd.
+  for (let s = 0; s < segs.length; s++) {
+    const c = segs[s];
+    const steps = 48;
+    let px = c[0][0];
+    let py = c[0][1];
+    for (let k = 1; k <= steps; k++) {
+      const [x, y] = cubicAt(c, k / steps);
+      const d = segDist(u, v, px, py, x, y);
+      if (d < best.d) best = { d, seg: s, x, y };
+      px = x;
+      py = y;
+    }
+  }
+  return best;
+}
+
+/** Distance from a point to a segment, in UV. */
+function segDist(ux: number, uy: number, ax: number, ay: number, bx: number, by: number): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const l2 = dx * dx + dy * dy;
+  if (l2 === 0) return Math.hypot(ux - ax, uy - ay);
+  let t = ((ux - ax) * dx + (uy - ay) * dy) / l2;
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  return Math.hypot(ux - (ax + t * dx), uy - (ay + t * dy));
+}
+
+/**
+ * What is under the pointer, if anything.
+ *
+ * Later paths win: they are drawn last, so they are the ones on top and the
+ * ones you meant to grab when two overlap. Within a path, anchors beat handles
+ * beat the body — the small, specific target first, or you could never grab an
+ * anchor that sits on its own curve.
+ */
+export function hitPath(paths: PathData[], u: number, v: number, sizePx: number): PathHit | null {
+  for (let pi = paths.length - 1; pi >= 0; pi--) {
+    const p = paths[pi];
+    for (let ai = 0; ai < p.anchors.length; ai++) {
+      const a = p.anchors[ai];
+      if (uvDistPx(u, v, a.x, a.y, sizePx) <= PICK_PX) return { pi, part: 'anchor', ai };
+      if (a.hx !== 0 || a.hy !== 0) {
+        if (uvDistPx(u, v, a.x + a.hx, a.y + a.hy, sizePx) <= PICK_PX) {
+          return { pi, part: 'handle', ai, sign: 1 };
+        }
+        if (uvDistPx(u, v, a.x - a.hx, a.y - a.hy, sizePx) <= PICK_PX) {
+          return { pi, part: 'handle', ai, sign: -1 };
+        }
+      }
+    }
+    const near = nearestOnPath(p, u, v);
+    if (near.d * sizePx <= PICK_PX) {
+      return { pi, part: 'body', seg: near.seg, x: near.x, y: near.y };
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Editing
+// ---------------------------------------------------------------------------
+
+/** The same path, every anchor moved by the same UV delta. */
+export function translatePath(p: PathData, du: number, dv: number): PathData {
+  return {
+    ...p,
+    anchors: p.anchors.map((a) => ({ ...a, x: a.x + du, y: a.y + dv })),
+  };
+}
+
+export function withAnchor(p: PathData, ai: number, a: Anchor): PathData {
+  const anchors = p.anchors.slice();
+  anchors[ai] = a;
+  return { ...p, anchors };
+}
+
+/**
+ * The same path with an anchor inserted after segment `seg`.
+ *
+ * The new anchor starts with a zero handle — "smooth", so the curve through it
+ * is derived from its neighbours. Dropping it in at the point you clicked
+ * therefore does not kink the path; it only gives you something to grab.
+ */
+export function insertAnchor(p: PathData, seg: number, x: number, y: number): PathData {
+  const at = Math.min(seg + 1, p.anchors.length);
+  const anchors = p.anchors.slice();
+  anchors.splice(at, 0, { x, y, hx: 0, hy: 0 });
+  return { ...p, anchors };
+}
+
+export function removeAnchor(p: PathData, ai: number): PathData {
+  if (p.anchors.length <= 2) return p;
+  return { ...p, anchors: p.anchors.filter((_, i) => i !== ai) };
+}
+
+export function withBrush(p: PathData, brush: Partial<PathBrush>): PathData {
+  return { ...p, ...brush };
 }

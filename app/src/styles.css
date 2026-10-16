@@ -283,6 +283,15 @@ button:disabled { opacity: .35; cursor: default; }
 /* Amber, the same colour the arrows use: "this is information about the
    picture", not a warning about the app. */
 .ob-hint.warn { color: #fbbf24; }
+/* A real button rather than another hint: "delete the selected path" is an
+   action, and an action you have to read a paragraph to discover is one you
+   will not take. */
+.ob-btn {
+  font: inherit; font-size: 11px; color: var(--fg-dim);
+  background: var(--bg-2); border: 1px solid var(--line);
+  border-radius: 4px; padding: 2px 8px; cursor: pointer; flex: 0 0 auto;
+}
+.ob-btn:hover { color: var(--fg); background: var(--bg-3); }
 
 /* ---------- toolbox ---------- */
 .toolbox {

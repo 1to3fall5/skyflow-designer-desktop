@@ -1474,3 +1474,246 @@ fn an_obstacle_thumbnail_shows_its_mask_not_its_buffer() {
     // Recoloured on the way in: a greyscale mask on a grey panel is invisible.
     assert!(on[0] > 180 && on[2] > 180, "the mask plate should be light, got {on:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Pen paths: non-destructive
+//
+// A path layer stores anchors, not pixels. That is the whole difference from a
+// brush stroke, and these tests are the contract: the pixels are a function of
+// the geometry, so changing the geometry changes the pixels and nothing else.
+// ---------------------------------------------------------------------------
+
+use skyflow_lib::engine::path::{PathAnchor, PathData};
+
+fn pa(x: f32, y: f32) -> PathAnchor {
+    PathAnchor { x, y, hx: 0.0, hy: 0.0 }
+}
+
+fn pd(anchors: Vec<PathAnchor>) -> PathData {
+    PathData { anchors, closed: false, size: 24.0, hardness: 0.9, strength: 1.0 }
+}
+
+/** The layer's own buffer, cloned — the engine borrows it for everything else. */
+fn buf_of(e: &Engine, id: &str) -> Buf {
+    e.layer(id).unwrap().buf.clone()
+}
+
+/** (vx, vy) of the flow at a UV point, in the -1..1 frame the rest of the tests use. */
+fn flow_at(b: &Buf, u: f32, v: f32) -> (f32, f32) {
+    let n = b.w;
+    let i = ((v * n as f32) as usize * n + (u * n as f32) as usize) * 4;
+    (
+        (128.0 - b.data[i] as f32) / 127.0,
+        (b.data[i + 1] as f32 - 128.0) / 127.0,
+    )
+}
+
+/**
+ * Coverage at a UV point.
+ *
+ * Not `flow_at`: an unpainted pixel of a layer buffer is all zeroes, which
+ * decodes as a *full-length* vector, not a zero one. "Nothing here" is a
+ * question about alpha, and asking it of the vector gives the opposite answer.
+ */
+fn alpha_at(b: &Buf, u: f32, v: f32) -> u8 {
+    let n = b.w;
+    b.data[((v * n as f32) as usize * n + (u * n as f32) as usize) * 4 + 3]
+}
+
+#[test]
+fn a_path_layer_renders_from_its_geometry() {
+    // Nothing painted this. There was no `stroke` call at all — the pixels here
+    // are a rendering of two anchors, which is the entire claim being made.
+    let n = 256usize;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Path);
+    e.active = id.clone();
+
+    e.set_paths(&id, vec![pd(vec![pa(0.2, 0.5), pa(0.8, 0.5)])]);
+    e.composite();
+
+    let b = buf_of(&e, &id);
+    let (vx, vy) = flow_at(&b, 0.5, 0.5);
+    assert!(vx > 0.9, "a left-to-right path must flow +x, got {vx:.2}");
+    assert!(vy.abs() < 0.05, "a straight horizontal path has no y flow, got {vy:.2}");
+    // And the anchors are still there, which is the part a brush cannot do.
+    assert_eq!(e.paths_of(&id).len(), 1);
+    assert_eq!(e.paths_of(&id)[0].anchors.len(), 2);
+}
+
+#[test]
+fn moving_an_anchor_moves_the_flow_with_it() {
+    // The test of "non-destructive": you do not erase and redraw, you move the
+    // anchor and the rendering follows.
+    let n = 256usize;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Path);
+    e.active = id.clone();
+
+    e.set_paths(&id, vec![pd(vec![pa(0.2, 0.2), pa(0.8, 0.2)])]);
+    e.composite();
+    let before = buf_of(&e, &id);
+    let (top, _) = flow_at(&before, 0.5, 0.2);
+    assert!(top > 0.9, "the path should be at y=0.2 to begin with");
+
+    e.set_paths(&id, vec![pd(vec![pa(0.2, 0.8), pa(0.8, 0.8)])]);
+    e.composite();
+    let after = buf_of(&e, &id);
+    // The old row has to be *clean*, not smudged: regenerating from scratch is
+    // what makes an edit reversible. Painting over it would leave a ghost that
+    // no amount of later editing could get rid of.
+    assert_eq!(alpha_at(&after, 0.5, 0.2), 0, "the old position must be cleared");
+    let (new, _) = flow_at(&after, 0.5, 0.8);
+    assert!(new > 0.9, "the new position must be painted, got {new:.2}");
+}
+
+#[test]
+fn moving_one_path_leaves_the_others_untouched() {
+    // With twenty paths on a layer, moving one must not disturb the other
+    // nineteen — which is also why the dirty rect is per-path and not the layer.
+    let n = 256usize;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Path);
+    e.active = id.clone();
+
+    let left = pd(vec![pa(0.25, 0.2), pa(0.25, 0.8)]);
+    let right = pd(vec![pa(0.75, 0.2), pa(0.75, 0.8)]);
+    e.set_paths(&id, vec![left.clone(), right.clone()]);
+    e.composite();
+    let before = buf_of(&e, &id);
+
+    // Move the left one only; the right one is byte-identical before and after.
+    e.set_paths(&id, vec![pd(vec![pa(0.45, 0.2), pa(0.45, 0.8)]), right]);
+    e.composite();
+    let after = buf_of(&e, &id);
+
+    for v in [0.3f32, 0.5, 0.7] {
+        let (bvx, bvy) = flow_at(&before, 0.75, v);
+        let (avx, avy) = flow_at(&after, 0.75, v);
+        assert!((bvx - avx).abs() < 1e-6 && (bvy - avy).abs() < 1e-6,
+            "the right-hand path changed when the left one moved: {bvx:.4},{bvy:.4} -> {avx:.4},{avy:.4}");
+    }
+    // And the moved one did leave its old column behind, clean.
+    assert_eq!(alpha_at(&after, 0.25, 0.5), 0, "the moved path's old column should be clear");
+    // Both paths are vertical, so the flow is the y component, not the x one.
+    let (_, moved) = flow_at(&after, 0.45, 0.5);
+    assert!(moved > 0.9, "the moved path should be at x=0.45 now, got {moved:.2}");
+}
+
+#[test]
+fn undo_restores_the_geometry_not_just_the_pixels() {
+    // A step back has to put the anchors back too. Restoring pixels alone would
+    // leave the overlay showing anchors that no longer match the flow, and the
+    // next drag would snap the path back to where it was.
+    let mut e = bare_engine(128);
+    let id = e.add_layer(LayerKind::Path);
+    e.active = id.clone();
+
+    e.set_paths(&id, vec![pd(vec![pa(0.2, 0.5), pa(0.8, 0.5)])]);
+    e.save_history();
+    e.set_paths(&id, vec![pd(vec![pa(0.2, 0.9), pa(0.8, 0.9)])]);
+    e.save_history();
+    assert!((e.paths_of(&id)[0].anchors[0].y - 0.9).abs() < 1e-6);
+
+    assert!(e.undo(), "there should be something to undo");
+    let back = e.paths_of(&id);
+    assert!(!back.is_empty(), "undo must not drop the paths entirely");
+    assert!((back[0].anchors[0].y - 0.5).abs() < 1e-6,
+        "undo restored the wrong geometry: y={}", back[0].anchors[0].y);
+
+    e.composite();
+    let b = buf_of(&e, &id);
+    let (v, _) = flow_at(&b, 0.5, 0.5);
+    assert!(v > 0.9, "the pixels have to come back with the anchors, got {v:.2}");
+}
+
+#[test]
+fn a_path_layer_is_resolution_independent() {
+    // The anchors are in UV, so a resize re-renders them at the new size rather
+    // than stretching the old raster. This is the one thing a baked stroke can
+    // never do.
+    let mut e = bare_engine(128);
+    let id = e.add_layer(LayerKind::Path);
+    e.active = id.clone();
+    e.set_paths(&id, vec![pd(vec![pa(0.2, 0.5), pa(0.8, 0.5)])]);
+    e.composite();
+
+    e.resize(512);
+    e.composite();
+
+    assert_eq!(e.paths_of(&id)[0].anchors.len(), 2, "the anchors survive the resize");
+    let b = buf_of(&e, &id);
+    assert_eq!(b.w, 512);
+    let (v, _) = flow_at(&b, 0.5, 0.5);
+    assert!(v > 0.9, "the path must be re-rendered at the new size, got {v:.2}");
+    // 0.05 UV off the centreline is 6px at 128 — inside a 24px brush — but
+    // 26px at 512, which is outside it. Upscaling the old raster would keep the
+    // old 0.094 UV half-width and still paint here; re-rendering does not.
+    assert_eq!(alpha_at(&b, 0.5, 0.55), 0,
+        "the brush width is in pixels, so it must shrink in UV as the canvas grows");
+}
+
+#[test]
+fn clearing_a_path_layer_drops_the_geometry_too() {
+    // Leaving the anchors behind would make the next `set_paths` diff against
+    // paths that are not on screen, and clear would appear to do nothing.
+    let mut e = bare_engine(128);
+    let id = e.add_layer(LayerKind::Path);
+    e.active = id.clone();
+    e.set_paths(&id, vec![pd(vec![pa(0.2, 0.5), pa(0.8, 0.5)])]);
+    e.clear_layer(&id);
+    assert!(e.paths_of(&id).is_empty(), "clear has to remove the paths");
+}
+
+#[test]
+fn paths_survive_a_save_and_a_load() {
+    // The whole promise is "you can come back to this". A round trip that kept
+    // the pixels but dropped the anchors would look fine until you tried to
+    // move one.
+    let mut e = bare_engine(128);
+    let id = e.add_layer(LayerKind::Path);
+    e.active = id.clone();
+    e.set_paths(&id, vec![pd(vec![pa(0.2, 0.3), pa(0.8, 0.7)])]);
+    e.composite();
+
+    let path = write_tmp("paths.skyflow", &[]);
+    io::save_project(&e, path.to_str().unwrap()).expect("save");
+    let loaded = io::load_project(path.to_str().unwrap()).expect("load");
+
+    let paths = loaded.paths_of(&id);
+    assert_eq!(paths.len(), 1, "the path must come back");
+    assert!((paths[0].anchors[0].x - 0.2).abs() < 1e-6);
+    assert!((paths[0].anchors[1].y - 0.7).abs() < 1e-6);
+    assert!((paths[0].size - 24.0).abs() < 1e-6, "and the brush with it");
+}
+
+#[test]
+fn moving_a_path_does_not_erase_one_it_crosses() {
+    // The reason `regenerate` grows its region instead of clearing only the
+    // rectangle that moved: these two paths cross, so clearing the moved one's
+    // box wipes a chunk of the stationary one too. Re-stamping only the moved
+    // path would leave the crossing half-painted.
+    let n = 256usize;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Path);
+    e.active = id.clone();
+
+    let across = pd(vec![pa(0.2, 0.5), pa(0.8, 0.5)]);
+    let down = pd(vec![pa(0.5, 0.2), pa(0.5, 0.8)]);
+    e.set_paths(&id, vec![across, down.clone()]);
+    e.composite();
+
+    // Move the horizontal one down; the vertical one must come out whole.
+    e.set_paths(&id, vec![pd(vec![pa(0.2, 0.7), pa(0.8, 0.7)]), down]);
+    e.composite();
+    let b = buf_of(&e, &id);
+
+    for v in [0.25f32, 0.35, 0.45, 0.55, 0.65, 0.75] {
+        assert!(alpha_at(&b, 0.5, v) > 0,
+            "the crossing path lost its pixels at v={v}");
+    }
+    // And the moved path is at y=0.7. Sampled off the crossing: the vertical
+    // path is later in the list, so at the crossing itself it is the one on top.
+    let (vx, _) = flow_at(&b, 0.35, 0.7);
+    assert!(vx > 0.9, "the moved path should be at y=0.7, got {vx:.2}");
+}

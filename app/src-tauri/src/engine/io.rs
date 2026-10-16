@@ -263,6 +263,7 @@ pub fn save_project(engine: &Engine, path: &str) -> Result<(), String> {
             p: l.p.clone(),
             buf: zstd::stream::encode_all(&l.buf.data[..], 3).unwrap_or_else(|_| l.buf.data.clone()),
             mask: l.mask.as_ref().map(|m| zstd::stream::encode_all(&m.data[..], 3).unwrap_or_else(|_| m.data.clone())),
+            paths: l.paths.clone(),
         })
         .collect();
 
@@ -320,6 +321,7 @@ pub fn load_project(path: &str) -> Result<Engine, String> {
             p: s.p,
             buf,
             mask,
+            paths: s.paths,
             wind_dirty,
             buf_dirty: true,
             mask_dirty: true,

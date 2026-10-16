@@ -1,7 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import type { PathData } from './pen';
 
-export type LayerKind = 'paint' | 'wind' | 'obstacle';
+export type LayerKind = 'paint' | 'wind' | 'obstacle' | 'path';
 
 export interface LayerInfo {
   id: string;
@@ -15,6 +16,8 @@ export interface LayerInfo {
   disturbance_enabled: boolean;
   disturbance: number;
   has_mask: boolean;
+  /** Pen paths. Only ever non-empty on a `path` layer; empty elsewhere. */
+  paths: PathData[];
 }
 
 export interface AppState {
@@ -130,6 +133,20 @@ export const api = {
 
   floodFill: (u: number, v: number, threshold: number, target: string) =>
     invoke<Snapshot>('flood_fill', { req: { u, v, threshold, target } }).catch(() => EMPTY),
+
+  /**
+   * Replace a path layer's geometry and re-render it.
+   *
+   * The whole point: the anchors are the source of truth, so "edit a path"
+   * means sending a new anchor list, not painting over the old pixels. The
+   * engine diffs the two lists and rebuilds only the paths that moved, so
+   * dragging an anchor is one small snapshot per frame even at 4096.
+   *
+   * `done` is false while a drag is in flight (no history entry per frame);
+   * the caller saves history once on release.
+   */
+  setPaths: (id: string, paths: PathData[]) =>
+    invoke<Snapshot>('set_paths', { id, paths }).catch(() => EMPTY),
 };
 
 export { convertFileSrc };
