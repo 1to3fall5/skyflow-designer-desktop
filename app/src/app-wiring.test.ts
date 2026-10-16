@@ -129,7 +129,44 @@ describe('brush cursor: frozen while scrubbing', () => {
   it('gates the ring position update on the flag', () => {
     expect(paintView).toMatch(/if \(!frozen\)/);
   });
+});
 
+describe('the brush ring must never get stuck as an eyedropper', () => {
+  /**
+   * `.paint-cursor.picking` forces the ring to a 14px crosshair with
+   * `!important`, so it overrides the brush size outright. Which means a class
+   * that outlives its Alt key pins the ring at crosshair size indefinitely:
+   * 大小, F and `[` `]` all look dead, while the 3D ring — drawn in the shader,
+   * with no such class — stays correct. That asymmetry is the symptom.
+   *
+   * Alt+Tab, or a click on another window, delivers the keydown and eats the
+   * keyup. So the class has to be reconciled from more than one place.
+   */
+  it('drops the class when the window loses focus', () => {
+    // The missing keyup is exactly the case blur covers.
+    expect(paintView).toMatch(/window\.addEventListener\('blur', blur\)/);
+    expect(paintView).toMatch(/const blur = \(\) => showPicking\(false\);/);
+  });
+
+  it('reconciles against the pointer, which carries the truth about Alt', () => {
+    // Belt and braces: even a keyup lost some other way cannot survive one
+    // move of the mouse over the canvas.
+    expect(paintView).toMatch(/if \(e\.altKey !== altHeld\.current\) showPicking\(e\.altKey\);/);
+  });
+
+  it('heals on any key that arrives without Alt', () => {
+    // Scrubbing with F or nudging with `[` `]` is how you notice the ring is
+    // stuck, so those very keys have to clear it.
+    expect(paintView).toMatch(/if \(!e\.altKey\) showPicking\(false\);/);
+  });
+
+  it('has exactly one place that writes the class', () => {
+    // Two writers with two different ideas of "am I an eyedropper" is how it
+    // got stuck: the behaviour read the pointer, the appearance read the key.
+    expect(paintView.match(/classList\.toggle\('picking'/g) ?? []).toHaveLength(1);
+    expect(paintView).toMatch(/const showPicking = useCallback\(\(on: boolean\) => \{/);
+    expect(paintView).toMatch(/cursorRef\.current\?\.classList\.toggle\('picking', on\);/);
+  });
 });
 
 describe('brush scrub: releasing F must not reset the views', () => {

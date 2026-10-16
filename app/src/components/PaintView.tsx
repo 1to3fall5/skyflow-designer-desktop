@@ -219,6 +219,21 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
   // Alt gives you a *temporary* eyedropper; picking the tool makes it stick.
   // Without this distinction, releasing Alt mid-drag would keep sampling.
   const pickSticky = useRef(false);
+  /**
+   * Whether Alt is down, as far as the *ring's appearance* is concerned.
+   *
+   * `.paint-cursor.picking` forces the ring to a 14px crosshair with
+   * `!important`, so it overrides the brush size outright — which means a
+   * class that outlives its Alt key pins the ring at crosshair size for good:
+   * 大小, F and `[` `]` all look dead, while the 3D ring, which has no such
+   * class, keeps working. Alt+Tab or a click on another window eats the
+   * `keyup`, and that is exactly what happens.
+   *
+   * So the key is recorded here and reconciled against `e.altKey` on every
+   * pointer move, and dropped when the window loses focus. Either one alone
+   * still has a hole; together no stuck state survives a mouse move.
+   */
+  const altHeld = useRef(false);
   const panStart = useRef<{ x: number; y: number } | null>(null);
   const zoomStart = useRef<{ y: number; startScale: number } | null>(null);
   const rafId = useRef(0);
@@ -361,19 +376,34 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
 
   // Alt has to show the eyedropper the moment it goes down, without waiting
   // for the pointer to move.
+  const showPicking = useCallback((on: boolean) => {
+    if (altHeld.current === on) return;
+    altHeld.current = on;
+    cursorRef.current?.classList.toggle('picking', on);
+  }, []);
+
   useEffect(() => {
-    const set = (on: boolean) => {
-      cursorRef.current?.classList.toggle('picking', on);
+    const down = (e: KeyboardEvent) => {
+      if (e.key === 'Alt') { showPicking(true); return; }
+      // Any other key that arrives *without* Alt proves Alt is up, even if we
+      // never saw its keyup. So scrubbing with F or nudging with `[` `]` heals
+      // the ring on its own instead of doing nothing.
+      if (!e.altKey) showPicking(false);
     };
-    const down = (e: KeyboardEvent) => { if (e.key === 'Alt') set(true); };
-    const up = (e: KeyboardEvent) => { if (e.key === 'Alt') set(false); };
+    const up = (e: KeyboardEvent) => { if (e.key === 'Alt') showPicking(false); };
+    // Alt+Tab, or a click on another window, delivers the keydown and never
+    // the keyup. Without this the class — and with it the 14px crosshair —
+    // stays until Alt is pressed again.
+    const blur = () => showPicking(false);
     window.addEventListener('keydown', down);
     window.addEventListener('keyup', up);
+    window.addEventListener('blur', blur);
     return () => {
       window.removeEventListener('keydown', down);
       window.removeEventListener('keyup', up);
+      window.removeEventListener('blur', blur);
     };
-  }, []);
+  }, [showPicking]);
 
   /**
    * The path overlay: committed paths, the draft, and whatever is grabbable.
@@ -769,6 +799,10 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
   const onPointerMove = (e: React.PointerEvent) => {
     const p = propsRef.current;
     const { u, v } = getUV(e);
+    // The pointer event carries the truth about Alt, so reconcile the ring's
+    // appearance against it. A `keyup` that went missing (lost focus, another
+    // window) cannot survive one move of the mouse.
+    if (e.altKey !== altHeld.current) showPicking(e.altKey);
     // Dragging with Alt keeps sampling, the way Photoshop's eyedropper does.
     if (picking.current) {
       if (e.altKey || pickSticky.current) sample(u, v);
