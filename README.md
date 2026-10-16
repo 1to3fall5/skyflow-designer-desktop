@@ -27,8 +27,9 @@ npx tauri build  # 打包：NSIS 安装包 + MSI
 ## 测试
 
 ```bash
-cd app && npx vitest run                    # 前端 129 项
-cd app/src-tauri && cargo test -p skyflow-designer   # Rust 引擎 63 项
+cd app && npm test          # 前端 267 项 + Rust 引擎 89 项，共 356
+cd app && npm run test:fe   # 仅前端
+cd app && npm run test:rust # 仅引擎
 ```
 
 ## 与 Web 版的差别
@@ -37,6 +38,8 @@ cd app/src-tauri && cargo test -p skyflow-designer   # Rust 引擎 63 项
 - 原生窗口：无浏览器边框 / 右键菜单 / F5 / Ctrl+R，自带工程文件读写
 - 笔刷改为**到线段距离场** + 覆盖率并集，消除串珠与接痕
 - Photoshop 语义对齐：`强度` 是上限、`流量` 是速率，Alt 吸取强度
+- 不透明度归图层面板、模糊做成 `fx` 图层效果（可开关 / 可删除，非破坏性）
+- 钢笔路径是非破坏性的：锚点才是对象，像素只是它的一次渲染
 - 图层顺序可调，且逐像素影响合成（上层可覆盖下层障碍）
 
 细节见 [`app/README.md`](app/README.md)。

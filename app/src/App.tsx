@@ -3,6 +3,10 @@ import { open, save, message } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { api, nextStrokeId, AppState, LayerInfo, LayerKind, Snapshot } from './api';
 import type { PathData, PathBrush } from './pen';
+import {
+  FX_META, addEffect, setEffectEnabled, setEffectAmount, removeEffect,
+  type LayerEffect,
+} from './effects';
 import { resolveShortcut, shouldPrevent, SHORTCUT_HELP, type BrushParam, type Tool } from './shortcuts';
 import type { CursorUV } from './cursor';
 import PaintView, { PaintViewHandle, type PenInfo } from './components/PaintView';
@@ -141,6 +145,16 @@ const PARAM_SECT: Record<LayerKind, string> = {
 
 /** Kinds whose pixels come from parameters, so painting one edits its mask. */
 const GENERATED: ReadonlySet<LayerKind> = new Set<LayerKind>(['wind', 'obstacle']);
+
+/**
+ * Kinds that cannot take an effect.
+ *
+ * An obstacle layer contributes a mask and a disturbance plane, not a pixel
+ * buffer, so there is nothing for a blur to act on — and it already has its
+ * own softening dial (范围). Offering an effect here would be a control that
+ * moves and does nothing, which is worse than a disabled button.
+ */
+const NO_FX: ReadonlySet<LayerKind> = new Set<LayerKind>(['obstacle']);
 
 const RESOLUTIONS = [512, 1024, 2048, 4096];
 
@@ -514,6 +528,20 @@ export default function App() {
   }, [tool, structural]);
 
   /**
+   * Replace the active layer's effects.
+   *
+   * No `done == false` case: an effect is set by a discrete click or a slider
+   * release, and unlike dragging an anchor there is no gesture to coalesce —
+   * one change, one history entry.
+   */
+  const changeEffects = useCallback(async (effects: LayerEffect[]) => {
+    const id = stateRef.current?.active;
+    if (!id) return;
+    applyUpdate(await api.setEffects(id, effects));
+    api.saveHistory();
+  }, [applyUpdate]);
+
+  /**
    * One pen slider.
    *
    * With a path selected it retunes that path; with nothing selected it sets
@@ -690,6 +718,7 @@ export default function App() {
   // remember the geometry instead of the pixels. Only the generated kinds
   // (wind / obstacle) have no content of their own to paint into.
   const isAdj = activeLayer ? GENERATED.has(activeLayer.kind) : false;
+  const canFx = activeLayer ? !NO_FX.has(activeLayer.kind) : false;
 
   // ---- workspace split ----
   const workspaceRef = useRef<HTMLDivElement>(null);
@@ -878,20 +907,11 @@ export default function App() {
             </>
           )}
         </Section>
-
-        <Section title="边缘">
-          <Row label="模糊" value={String(activeLayer.blur | 0)}>
-            <Range min={0} max={64} step={1} value={activeLayer.blur}
-              onChange={(v) => updateLayer(activeLayer.id, { blur: v })} />
-          </Row>
-        </Section>
-
-        <Section title="混合">
-          <Row label="不透明度" value={`${Math.round(activeLayer.opacity * 100)}%`}>
-            <Range min={0} max={1} value={activeLayer.opacity}
-              onChange={(v) => updateLayer(activeLayer.id, { opacity: v })} />
-          </Row>
-        </Section>
+        {/* 不透明度 and 模糊 are deliberately *not* here. The first is in the
+            图层 panel, where Photoshop keeps it — it says how much of the layer
+            you let through, which is a question about the stack, not about this
+            layer's content. The second became an effect: see the `fx` badge on
+            the layer row. What is left is what the layer actually *is*. */}
       </>
     ) : null,
 
@@ -911,6 +931,14 @@ export default function App() {
           <IconBtn icon="wind" title="新建风向图层" onClick={() => structural(api.addLayer('wind'))} />
           <IconBtn icon="box" title="新建障碍图层" onClick={() => structural(api.addLayer('obstacle'))} />
           <span className="bar-sep" />
+          {/* PS's "add a layer style" button lives in this strip, and so does
+              this one: an effect is not a property of the layer, it is
+              something you hang on it, so it gets an action rather than a
+              slider. */}
+          <IconBtn icon="fx" title={canFx ? '添加图层效果：模糊' : '障碍层由遮罩决定边缘，它没有可加的效果'}
+            disabled={!canFx}
+            onClick={() => activeLayer && changeEffects(addEffect(activeLayer.effects, 'blur'))} />
+          <span className="bar-sep" />
           {/* Keyboard- and pointer-reachable reordering. Drag and drop works
               too, but it is undiscoverable on its own. */}
           <IconBtn icon="up" title="上移一层（越靠上越晚合成，即覆盖下方图层）"
@@ -922,6 +950,20 @@ export default function App() {
             disabled={state.layers.length <= 1}
             onClick={() => activeLayer && structural(api.removeLayer(activeLayer.id))} />
         </div>
+
+        {/* 不透明度 sits here, above the list, exactly where Photoshop puts it
+            — not in the 属性 panel. It is not a fact about this layer's
+            content; it is how much of the stack below you let through, which
+            is a question about the stack. 属性 is left holding what the layer
+            actually *is*. */}
+        {activeLayer && (
+          <Row label="不透明度" value={`${Math.round(activeLayer.opacity * 100)}%`}>
+            <Range min={0} max={1} value={activeLayer.opacity}
+              title="这一层透下去多少。整条图层栈每一层的这个数共同决定最终画面。"
+              onChange={(v) => updateLayer(activeLayer.id, { opacity: v })} />
+          </Row>
+        )}
+
         <div className="layer-list bleed" ref={layerListRef}>
           {layers.map((l) => {
             const meta = KIND_META[l.kind];
@@ -970,6 +1012,17 @@ export default function App() {
                   <span className="chip hint" title="绘制即编辑遮罩">遮罩</span>
                 )}
 
+                {/* The `fx` badge. Carried by every layer that has effects, not
+                    only the selected one: it has to be visible for a layer you
+                    are not on, or you cannot tell which layers are doing
+                    something to their pixels. */}
+                {l.effects.length > 0 && (
+                  <span className="chip fx-badge"
+                    title={l.effects.map((e) => FX_META[e.kind].label).join('、')}>
+                    fx
+                  </span>
+                )}
+
                 {/* Reordering handle. The whole row is draggable, so this is an
                     affordance rather than the only target — it fades in on
                     hover so it does not read as a column of its own. */}
@@ -978,6 +1031,40 @@ export default function App() {
             );
           })}
         </div>
+
+        {/* Effects of the selected layer, listed under its row the way PS
+            indents them under the layer they hang on. Only the selected one:
+            every layer's effects at once would be a wall of sliders, and you
+            can only edit one layer's at a time anyway. */}
+        {activeLayer && activeLayer.effects.length > 0 && (
+          <div className="fx-list">
+            {activeLayer.effects.map((e, ei) => {
+              const m = FX_META[e.kind];
+              return (
+                <div key={ei} className={`fx-row ${e.enabled ? '' : 'off'}`}>
+                  <button className={`eye ${e.enabled ? 'shown' : ''}`}
+                    title={e.enabled ? `停用${m.label}` : `启用${m.label}`}
+                    aria-label={e.enabled ? `停用${m.label}` : `启用${m.label}`}
+                    onClick={() =>
+                      changeEffects(setEffectEnabled(activeLayer.effects, ei, !e.enabled))}>
+                    <ToolIcon name={e.enabled ? 'eye' : 'sq'} size={13} />
+                  </button>
+                  <span className="fx-name ellipsis">{m.label}</span>
+                  <Range min={m.min} max={m.max} step={m.step} value={e.amount}
+                    title={m.title} disabled={!e.enabled}
+                    onChange={(v) =>
+                      changeEffects(setEffectAmount(activeLayer.effects, ei, v))} />
+                  <span className="fx-val">{e.amount | 0}</span>
+                  <button className="fx-del" title={`删除${m.label}`}
+                    aria-label={`删除${m.label}`}
+                    onClick={() => changeEffects(removeEffect(activeLayer.effects, ei))}>
+                    <ToolIcon name="x" size={12} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </>
     ),
 

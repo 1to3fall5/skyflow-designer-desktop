@@ -1,4 +1,5 @@
 pub mod buf;
+pub mod effect;
 pub mod io;
 pub mod ops;
 pub mod path;
@@ -7,6 +8,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use buf::{wrap_i, Buf};
+use effect::{blur_amount, LayerEffect};
 use ops::{apply_disturbance, blur, blur_influence, flood_fill, generate_wind,
           obstacle_alpha_plane, stamp, StampStyle, Projection, PAR_MIN_ROWS};
 use path::{generate_paths, PathData};
@@ -32,7 +34,16 @@ pub struct LayerParams {
     pub kind: LayerKind,
     pub visible: bool,
     pub opacity: f32,
-    pub blur: f32,
+    /// What is *done to* this layer: see `effect.rs`. A list, not a `blur`
+    /// field, so an effect can be added, switched off and removed without
+    /// losing the number it was tuned to.
+    #[serde(default)]
+    pub effects: Vec<LayerEffect>,
+    /// Read-only: projects saved before effects existed carried a bare radius.
+    /// `io::load_project` turns a v1 file's radius into a blur effect; this
+    /// field exists only so the migration has somewhere to land.
+    #[serde(default)]
+    pub legacy_blur: f32,
     // wind
     pub direction: f32,
     pub strength: f32,
@@ -120,7 +131,8 @@ impl Engine {
                 kind: LayerKind::Paint,
                 visible: true,
                 opacity: 1.0,
-                blur: 0.0,
+                effects: Vec::new(),
+                legacy_blur: 0.0,
                 direction: 0.0,
                 strength: 0.0,
                 disturbance_enabled: false,
@@ -143,7 +155,8 @@ impl Engine {
                 kind: LayerKind::Wind,
                 visible: true,
                 opacity: 1.0,
-                blur: 0.0,
+                effects: Vec::new(),
+                legacy_blur: 0.0,
                 direction: 45.0,
                 strength: 0.5,
                 disturbance_enabled: false,
@@ -294,7 +307,8 @@ impl Engine {
             kind: kind.clone(),
             visible: true,
             opacity: 1.0,
-            blur: 0.0,
+            effects: Vec::new(),
+            legacy_blur: 0.0,
             direction: 45.0,
             strength: 0.5,
             disturbance_enabled: true,
@@ -689,6 +703,26 @@ impl Engine {
         self.layer(id).map(|l| l.paths.clone()).unwrap_or_default()
     }
 
+    // -- effects -------------------------------------------------------------
+
+    /**
+     * Replace a layer's effects.
+     *
+     * Effects are whole-canvas by nature — blur reads a neighbourhood, so
+     * changing it moves pixels far outside any dirty rectangle — hence the
+     * unconditional full rebuild. It is also cheap to say: the list is a
+     * handful of small records, unlike a path or a brush stroke.
+     */
+    pub fn set_effects(&mut self, id: &str, effects: Vec<LayerEffect>) {
+        let Some(l) = self.layer_mut(id) else { return };
+        l.p.effects = effects;
+        l.p.legacy_blur = 0.0;
+        // Keyed on the radius, so it is rebuilt on the next composite.
+        l.blur_cache = None;
+        self.full_dirty = true;
+        self.invalidate_accum();
+    }
+
     // -- history -------------------------------------------------------------
 
     pub fn save_history(&mut self) {
@@ -794,17 +828,30 @@ impl Engine {
                 l.wind_dirty = false;
                 global = true;
             }
-            if matches!(l.p.kind, LayerKind::Paint | LayerKind::Path) && l.p.blur > 0.0 {
-                let stale = l.blur_cache.as_ref().map(|c| c.0 != l.p.blur).unwrap_or(true);
+            // Effects apply to whatever a layer's *content* is — painted
+            // pixels, rasterised paths, or the generated wind field. Not to an
+            // obstacle layer: what it contributes is a mask and a disturbance
+            // plane, and it already has its own softening dial.
+            let radius = if matches!(l.p.kind, LayerKind::Wind | LayerKind::Paint | LayerKind::Path) {
+                blur_amount(&l.p.effects)
+            } else {
+                0.0
+            };
+            if radius > 0.0 {
+                let stale = l.blur_cache.as_ref().map(|c| c.0 != radius).unwrap_or(true);
                 if l.buf_dirty || stale {
-                    let b = blur(&l.buf, l.p.blur);
-                    l.blur_cache = Some((l.p.blur, b));
+                    let b = blur(&l.buf, radius);
+                    l.blur_cache = Some((radius, b));
                     l.buf_dirty = false;
                     // A different radius rewrites the whole blurred field.
                     if stale {
                         global = true;
                     }
                 }
+            } else if l.blur_cache.take().is_some() {
+                // Radius went to zero, so the cached copy must not be used
+                // again — and the un-blurred buffer is what shows now.
+                global = true;
             }
             if l.p.kind == LayerKind::Obstacle {
                 let want = l.mask.is_some() && l.p.disturbance_enabled && l.p.disturbance > 0.0;
@@ -845,9 +892,8 @@ impl Engine {
 
         let pad = self.layers
             .iter()
-            .filter(|l| l.p.visible && matches!(l.p.kind, LayerKind::Paint | LayerKind::Path)
-                && l.p.blur > 0.0)
-            .map(|l| blur_influence(l.p.blur))
+            .filter(|l| l.p.visible && matches!(l.p.kind, LayerKind::Wind | LayerKind::Paint | LayerKind::Path))
+            .map(|l| blur_influence(blur_amount(&l.p.effects)))
             .max()
             .unwrap_or(0);
         let x0 = rx.saturating_sub(pad);
@@ -898,19 +944,25 @@ impl Engine {
                 // pixels got there.
                 LayerKind::Paint | LayerKind::Path => {
                     let src: &Buf = match &l.blur_cache {
-                        Some(c) if l.p.blur > 0.0 => &c.1,
+                        Some(c) if c.0 > 0.0 => &c.1,
                         _ => &l.buf,
                     };
                     blend_over(&mut acc, src, op, x0, x1, y0, y1);
                 }
-                LayerKind::Wind => match &l.mask {
-                    Some(mask) => {
-                        copy_rect(&mut helper, &l.buf, x0, x1, y0, y1);
-                        mask_in(&mut helper, mask, x0, x1, y0, y1);
-                        blend_over(&mut acc, &helper, op, x0, x1, y0, y1);
+                LayerKind::Wind => {
+                    let src: &Buf = match &l.blur_cache {
+                        Some(c) if c.0 > 0.0 => &c.1,
+                        _ => &l.buf,
+                    };
+                    match &l.mask {
+                        Some(mask) => {
+                            copy_rect(&mut helper, src, x0, x1, y0, y1);
+                            mask_in(&mut helper, mask, x0, x1, y0, y1);
+                            blend_over(&mut acc, &helper, op, x0, x1, y0, y1);
+                        }
+                        None => blend_over(&mut acc, src, op, x0, x1, y0, y1),
                     }
-                    None => blend_over(&mut acc, &l.buf, op, x0, x1, y0, y1),
-                },
+                }
                 LayerKind::Obstacle => {
                     let Some(mask) = &l.mask else { continue };
                     if let Some((_, plane, lw, lh, ss)) = &l.plane_cache {

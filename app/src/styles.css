@@ -673,6 +673,50 @@ input[type=checkbox] {
   color: var(--txt-dim); background: var(--field); border: 1px solid var(--field-border);
   cursor: help; white-space: nowrap;
 }
+/* The `fx` mark. Amber, the colour the arrows and every other piece of
+   "information about the picture" already use — it is not a control and must
+   not read as one. */
+.chip.fx-badge {
+  font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 4px;
+  color: #fbbf24; background: rgba(251, 191, 36, .12);
+  border: 1px solid rgba(251, 191, 36, .35);
+  cursor: help; white-space: nowrap;
+}
+
+/* ---------- layer effects ---------- */
+/* Indented under the list, the way PS hangs a layer's styles beneath the layer
+   they belong to: the effect is not a sibling of the layer, it is *on* it.
+   The indent is the thumbnail column, so the effect's own eye lands in the same
+   vertical line as every other eye in the panel and the column keeps reading
+   as a column. */
+.fx-list {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--separator);
+  padding: 3px 5px 5px 31px;
+  display: flex; flex-direction: column; gap: 3px;
+}
+.fx-row {
+  display: flex; align-items: center; gap: 6px;
+  min-height: 24px;
+}
+.fx-row .eye { width: 16px; height: 16px; flex: 0 0 16px; }
+.fx-name { font-size: 11px; color: var(--txt-dim); flex: 0 0 34px; }
+.fx-row.off .fx-name { color: var(--txt-faint); }
+/* Dimmed, not removed — the same rule as every other panel row. Ticking an
+   effect off must not move the row out from under the pointer. */
+.fx-val {
+  font-size: 10px; color: var(--txt-dim); flex: 0 0 22px; text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.fx-row.off .fx-val { color: var(--txt-faint); }
+.fx-row .rng { flex: 1; min-width: 0; }
+.fx-del {
+  width: 16px; height: 16px; flex: 0 0 16px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0; background: none; border: none; border-radius: 3px;
+  color: var(--txt-faint); cursor: pointer;
+}
+.fx-del:hover { color: #f87171; background: var(--field); }
 
 /* ---------- workspace ---------- */
 /* Canvas surround. Darker than the chrome so the artwork reads as a document

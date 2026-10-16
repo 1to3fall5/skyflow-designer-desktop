@@ -106,6 +106,16 @@ const PATHS: Record<string, string[]> = {
   sq: [
     'M6.5 4.5h11a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2z',
   ],
+  // Layer effects. Photoshop's own `fx` badge is a small four-point star, and
+  // that is the mark people look for down the right-hand side of the layer
+  // list — a sliders or wand glyph would read as a tool, not as a badge.
+  fx: [
+    'M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z',
+    'M18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z',
+  ],
+  // Delete one effect. Deliberately a plain cross and not a bin: a bin means
+  // "throw the whole thing away", and this only removes one row from a list.
+  x: ['M6 6l12 12', 'M18 6L6 18'],
 };
 
 export type IconName = keyof typeof PATHS;

@@ -3,6 +3,7 @@
 
 use skyflow_lib::engine::buf::Buf;
 use skyflow_lib::engine::io;
+use skyflow_lib::engine::effect::LayerEffect;
 use skyflow_lib::engine::ops::{self, Projection};
 use skyflow_lib::engine::{Engine, LayerKind};
 
@@ -1344,7 +1345,7 @@ fn a_blurred_layer_still_rebuilds_its_fringe() {
     let mut e = bare_engine(n);
     let id = e.add_layer(LayerKind::Paint);
     e.active = id.clone();
-    e.layer_mut(&id).unwrap().p.blur = 8.0;
+    e.set_effects(&id, vec![LayerEffect::blur(8.0)]);
     e.composite();
     e.clear_dirty();
 
@@ -1716,4 +1717,188 @@ fn moving_a_path_does_not_erase_one_it_crosses() {
     // path is later in the list, so at the crossing itself it is the one on top.
     let (vx, _) = flow_at(&b, 0.35, 0.7);
     assert!(vx > 0.9, "the moved path should be at y=0.7, got {vx:.2}");
+}
+
+// ---------------------------------------------------------------------------
+// Layer effects
+//
+// An effect is a record on the layer, not a field that means "some blur".
+// These are the reasons it is a list: it can be added, switched off without
+// losing its number, and removed — and none of those touch the pixels.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_blur_effect_softens_the_layer_without_touching_its_pixels() {
+    // The whole claim: the effect is applied on the way out. The layer's own
+    // buffer still holds the hard-edged stroke, so turning the effect off is
+    // free and reversible — which is not true of blurring in place.
+    let n = 128usize;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+    e.stroke(&[(0.3, 0.5), (0.7, 0.5)], 20.0, 1.0, 1.0, false, "content", 1, 1.0);
+    e.composite();
+    let sharp = buf_of(&e, &id);
+
+    e.set_effects(&id, vec![LayerEffect::blur(10.0)]);
+    e.composite();
+
+    // The layer's own pixels are untouched...
+    assert_eq!(buf_of(&e, &id).data, sharp.data, "an effect must not rewrite the buffer");
+    // ...but the composite is softer: paint spread onto the row above the stroke.
+    let above = alpha_at(&e.composite, 0.5, 0.5 - 14.0 / n as f32);
+    assert!(above > 0, "a blurred layer must bleed past its own edge");
+}
+
+#[test]
+fn switching_an_effect_off_keeps_its_number() {
+    // The reason `enabled` exists. Off has to mean "stop applying it", not
+    // "forget it" — otherwise A/B-ing an effect means re-dialling it each time.
+    let n = 128usize;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+
+    e.stroke(&[(0.3, 0.5), (0.7, 0.5)], 20.0, 1.0, 1.0, false, "content", 1, 1.0);
+    e.set_effects(&id, vec![LayerEffect::blur(18.0)]);
+    e.composite();
+    let blurred = e.composite.data.clone();
+
+    e.set_effects(&id, vec![LayerEffect {
+        kind: skyflow_lib::engine::effect::EffectKind::Blur,
+        enabled: false,
+        amount: 18.0,
+    }]);
+    assert_eq!(e.layer(&id).unwrap().p.effects[0].amount, 18.0,
+        "disabling must not reset the radius");
+    e.composite();
+    assert_ne!(e.composite.data, blurred, "switching it off has to do something");
+
+    // ...and must be indistinguishable from never having had one.
+    e.set_effects(&id, vec![]);
+    e.composite();
+    let none = e.composite.data.clone();
+    e.set_effects(&id, vec![LayerEffect {
+        kind: skyflow_lib::engine::effect::EffectKind::Blur,
+        enabled: false,
+        amount: 18.0,
+    }]);
+    e.composite();
+    assert_eq!(e.composite.data, none, "a disabled effect must leave the layer alone");
+}
+
+#[test]
+fn two_blur_effects_take_the_larger_rather_than_compounding() {
+    // Compounding would give a radius neither slider says.
+    let n = 128usize;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+    let two = vec![LayerEffect::blur(6.0), LayerEffect::blur(20.0)];
+    e.set_effects(&id, two);
+    e.stroke(&[(0.3, 0.5), (0.7, 0.5)], 20.0, 1.0, 1.0, false, "content", 1, 1.0);
+    e.composite();
+    let both = e.composite.data.clone();
+
+    e.set_effects(&id, vec![LayerEffect::blur(20.0)]);
+    e.composite();
+    assert_eq!(e.composite.data, both, "the larger radius must win outright");
+}
+
+#[test]
+fn removing_the_last_effect_restores_the_sharp_layer() {
+    // An effect you can add but not take away is a one-way door.
+    let n = 128usize;
+    let mut e = bare_engine(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+    e.stroke(&[(0.3, 0.5), (0.7, 0.5)], 20.0, 1.0, 1.0, false, "content", 1, 1.0);
+    e.set_effects(&id, vec![]);
+    e.composite();
+    let plain = e.composite.data.clone();
+
+    e.set_effects(&id, vec![LayerEffect::blur(12.0)]);
+    e.composite();
+    assert_ne!(e.composite.data, plain, "adding the effect has to do something");
+
+    e.set_effects(&id, vec![]);
+    e.composite();
+    assert_eq!(e.composite.data, plain, "removing it has to put it back exactly");
+}
+
+#[test]
+fn effects_survive_a_save_and_a_load() {
+    let mut e = bare_engine(64);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+    e.set_effects(&id, vec![LayerEffect::blur(14.0)]);
+
+    let path = write_tmp("fx.skyflow", &[]);
+    io::save_project(&e, path.to_str().unwrap()).expect("save");
+    let loaded = io::load_project(path.to_str().unwrap()).expect("load");
+    let fx = &loaded.layer(&id).unwrap().p.effects;
+    assert_eq!(fx.len(), 1, "the effect must come back");
+    assert!((fx[0].amount - 14.0).abs() < 1e-6);
+    assert!(fx[0].enabled, "and still switched on");
+}
+
+#[test]
+fn a_project_from_before_effects_opens_with_its_blur_as_an_effect() {
+    // v1 carried a bare `blur` radius on every layer. Dropping it silently
+    // would leave a file that opens looking sharper than it was saved, with
+    // nothing on screen to say why.
+    //
+    // MessagePack encodes structs as arrays, so a tuple with the fields in the
+    // old order *is* the old format — that is how this builds a real v1 file
+    // without keeping a writer for it.
+    let n = 64usize;
+    let pixels = vec![0u8; n * n * 4];
+    let buf = zstd::stream::encode_all(&pixels[..], 3).unwrap();
+    let p = (
+        "paint-1".to_string(),
+        "流向 1".to_string(),
+        LayerKind::Paint,
+        true,
+        1.0f32,
+        9.0f32, // visible, opacity, blur
+        45.0f32,
+        0.5f32, // direction, strength
+        true,
+        0.5f32,
+        false, // disturbance_enabled, disturbance, has_mask
+    );
+    let proj = (
+        1u32,
+        n,
+        0u8,
+        90.0f32,
+        "paint-1".to_string(),
+        vec![(p, buf, None::<Vec<u8>>)],
+        None::<Vec<u8>>,
+    );
+    let body = rmp_serde::to_vec(&proj).unwrap();
+    let packed = zstd::stream::encode_all(&body[..], 3).unwrap();
+    let mut raw = b"SKYFLW".to_vec();
+    raw.extend_from_slice(&1u32.to_le_bytes());
+    raw.extend_from_slice(&packed);
+
+    let path = write_tmp("legacy.skyflow", &raw);
+    let loaded = io::load_project(path.to_str().unwrap())
+        .expect("a project saved by 1.0.0 must still open");
+    let fx = &loaded.layer("paint-1").unwrap().p.effects;
+    assert_eq!(fx.len(), 1, "the old radius must come back as an effect");
+    assert!((fx[0].amount - 9.0).abs() < 1e-6, "and with the number it had");
+    assert!(fx[0].enabled);
+}
+
+#[test]
+fn a_project_from_the_future_is_rejected_rather_than_half_read() {
+    // The version check is what makes the migration safe: an unknown layout
+    // must not be guessed at field by field.
+    let path = write_tmp("future.skyflow", &[]);
+    let mut raw = b"SKYFLW".to_vec();
+    raw.extend_from_slice(&99u32.to_le_bytes());
+    raw.extend_from_slice(&[0u8; 8]);
+    std::fs::write(path.to_str().unwrap(), &raw).unwrap();
+    assert!(io::load_project(path.to_str().unwrap()).is_err());
 }

@@ -49,6 +49,10 @@ const STRUCTURAL = [
   // and what the overlay is allowed to show; routing it through applySnap
   // would leave React editing a path list the engine had already replaced.
   'setPaths',
+  // An effect changes what the engine does to the layer's pixels, so the
+  // snapshot comes back with a new composite *and* a new layer record; the
+  // fx badge and the effect rows both read that record.
+  'setEffects',
 ];
 
 /** Commands that may bypass state: they only move paint pixels. */
@@ -706,16 +710,27 @@ describe('panel contents, laid out the way Photoshop lays them out', () => {
     expect(rawStyles).not.toMatch(/\.chev \{ font-size/);
   });
 
-  it('gives 属性 three sections instead of one flat list', () => {
-    // PS's Properties panel is 变换 / 对齐并分布 / 快速操作. Ours is the
-    // kind-specific generator, then the two things every layer has.
+  it('leaves 属性 holding only what the layer is', () => {
+    // 不透明度 moved to the 图层 panel (it is a question about the stack) and
+    // 模糊 became an effect. What is left is one section: the kind-specific
+    // generator. Two of the three sections are gone on purpose.
     expect(src).toMatch(/<Section title=\{PARAM_SECT\[activeLayer\.kind\]\}>/);
-    expect(src).toMatch(/<Section title="边缘">/);
-    expect(src).toMatch(/<Section title="混合">/);
+    expect(src).not.toMatch(/<Section title="边缘">/);
+    expect(src).not.toMatch(/<Section title="混合">/);
     // A paint layer has no parameters of its own; an empty panel reads as
     // broken, so it explains where its parameters actually live.
     expect(src).toMatch(/<p className="note">/);
     expect(rawStyles).toMatch(/\.note \{ margin: 0; font-size: 11px;/);
+  });
+
+  it('does not offer 不透明度 in 属性 at all', () => {
+    // It is legal for it to appear twice only if both are the same control;
+    // they are not — one would go stale. Count the label instead of trusting
+    // that a match was found in the right panel.
+    const i = src.indexOf('props: activeLayer ?');
+    const propsPanel = src.slice(i, src.indexOf('\n    layers:', i));
+    expect(i).toBeGreaterThan(0);
+    expect(propsPanel).not.toMatch(/不透明度/);
   });
 
   it('puts a value in an inset field, not in tinted text', () => {
@@ -930,6 +945,87 @@ describe('a control that does not apply is dimmed, not removed', () => {
     const off = rawStyles.match(/\.row\.off[^\n]*/g) ?? [];
     expect(off.length).toBeGreaterThan(0);
     expect(off.join('\n')).not.toContain('opacity');
+  });
+});
+
+describe('layer effects: something you hang on a layer', () => {
+  /**
+   * 模糊 used to be a slider in 属性 called 模糊. That is the wrong noun. A
+   * layer's parameters are what it *is*; a blur is something done to its
+   * pixels afterwards, and Photoshop keeps those apart — parameters in
+   * Properties, effects behind the `fx` badge on the layer row.
+   *
+   * The consequence is that an effect is a *record* (kind + on/off + amount)
+   * rather than a number: it can be added, switched off while keeping the
+   * number it was tuned to, and removed again.
+   */
+  const i = src.indexOf('    layers: (');
+  const layersPanel = src.slice(i, src.indexOf('\n    view:', i));
+
+  it('puts 不透明度 in the 图层 panel, above the list', () => {
+    // Above the rows, the way PS has it: a single control that always means
+    // "the selected layer", so there is no ambiguity about which row it owns.
+    expect(layersPanel).toMatch(/<Row label="不透明度"/);
+    expect(layersPanel.indexOf('<Row label="不透明度"'))
+      .toBeLessThan(layersPanel.indexOf('<div className="layer-list'));
+    // ...and it is still a real layer write, not a local preview value.
+    expect(layersPanel).toMatch(/updateLayer\(activeLayer\.id, \{ opacity: v \}\)/);
+  });
+
+  it('adds an effect with an action, not by revealing a slider', () => {
+    // PS's "add a layer style" is a button in the panel footer; a hidden
+    // slider would only ever appear once you already knew it was there.
+    expect(layersPanel).toMatch(/<IconBtn icon="fx"/);
+    expect(layersPanel).toMatch(/changeEffects\(addEffect\(activeLayer\.effects, 'blur'\)\)/);
+  });
+
+  it('refuses the one kind that has no pixels to blur', () => {
+    // An obstacle layer contributes a mask, so there is nothing for a blur to
+    // act on; offering it would produce a control that does nothing.
+    expect(src).toMatch(/const NO_FX: ReadonlySet<LayerKind> = new Set<LayerKind>\(\['obstacle'\]\);/);
+    expect(src).toMatch(/const canFx = activeLayer \? !NO_FX\.has\(activeLayer\.kind\) : false;/);
+    expect(layersPanel).toMatch(/disabled=\{!canFx\}/);
+  });
+
+  it('badges every layer that has effects, not just the active one', () => {
+    // The point of the mark is to answer "which layers are doing something to
+    // their pixels" while you are looking at a different one.
+    expect(layersPanel).toMatch(/\{l\.effects\.length > 0 && \(/);
+    expect(layersPanel).toMatch(/className="chip fx-badge"/);
+    expect(rawStyles).toMatch(/\.chip\.fx-badge \{/);
+  });
+
+  it('lists the selected layer\'s effects under it, each with an eye of its own', () => {
+    // Indented under the layer, per-effect eye / name / amount / delete — the
+    // same shape as a layer row, because that is what it parallels.
+    expect(layersPanel).toMatch(/<div className="fx-list">/);
+    expect(layersPanel).toMatch(/className=\{`fx-row \$\{e\.enabled \? '' : 'off'\}`\}/);
+    expect(layersPanel).toMatch(/setEffectEnabled\(activeLayer\.effects, ei, !e\.enabled\)/);
+    expect(layersPanel).toMatch(/setEffectAmount\(activeLayer\.effects, ei, v\)/);
+    expect(layersPanel).toMatch(/removeEffect\(activeLayer\.effects, ei\)/);
+    // Indent 31px = the thumbnail column, so effect eyes land under layer eyes.
+    expect(rawStyles).toMatch(/\.fx-list \{[\s\S]*?padding: 3px 5px 5px 31px;/);
+  });
+
+  it('dims a switched-off effect instead of removing its row', () => {
+    // Same rule as everywhere else: switching one off must not move the rows
+    // below it out from under the pointer, and the amount has to stay
+    // readable — it is the number the effect will come back at.
+    expect(layersPanel).toMatch(/disabled=\{!e\.enabled\}/);
+    expect(rawStyles).toMatch(/\.fx-row\.off \.fx-name \{ color: var\(--txt-faint\); \}/);
+    expect(rawStyles).toMatch(/\.fx-row\.off \.fx-val \{ color: var\(--txt-faint\); \}/);
+    // ...and the row keeps its height, so nothing below it shifts.
+    expect(rawStyles).toMatch(/\.fx-row \{[\s\S]*?min-height: 24px;/);
+  });
+
+  it('sends every effect edit through setEffects and into React state', () => {
+    // One command for all four edits, so an effect list can never disagree
+    // with the engine about how many effects a layer has.
+    expect(src).toMatch(/const changeEffects = useCallback\(async \(effects: LayerEffect\[\]\) =>/);
+    expect(src).toMatch(/applyUpdate\(await api\.setEffects\(id, effects\)\)/);
+    // An effect is undoable, so it has to be a history entry just like a
+    // layer rename — otherwise Ctrl+Z leaves the badge and the pixels apart.
+    expect(src).toMatch(/api\.setEffects\(id, effects\)\);\s*\n\s*api\.saveHistory\(\);/);
   });
 });
 

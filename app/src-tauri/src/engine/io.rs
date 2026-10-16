@@ -4,11 +4,13 @@ use image::ImageFormat;
 use serde::{Deserialize, Serialize};
 
 use super::buf::Buf;
+use super::effect::LayerEffect;
 use super::ops::upscale;
 use super::{Engine, LayerKind, LayerSnapshot};
 
 const MAGIC: &[u8; 6] = b"SKYFLW";
-const FORMAT_VERSION: u32 = 1;
+/// v2 replaced a layer's bare `blur` radius with a list of effects.
+const FORMAT_VERSION: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // Reference image
@@ -248,6 +250,90 @@ struct ProjectData {
     reference: Option<Vec<u8>>,
 }
 
+// -- v1 -------------------------------------------------------------------
+//
+// MessagePack encodes these structs as *arrays*, so a field added anywhere but
+// the end shifts every one after it and an old file stops parsing. That is what
+// forced the version bump: effects replaced `blur` in the middle of a layer.
+//
+// Keeping the old shape around costs twenty lines and buys back every project
+// saved by 1.0.0 — including the blur radius, which becomes the effect it
+// always meant.
+
+#[derive(Deserialize)]
+struct ProjectV1 {
+    /// v1 wrote its version inside the body as well as in the header, so the
+    /// field has to be read even though the header is what we branch on.
+    _version: u32,
+    size: usize,
+    projection: u8,
+    polar_angle: f32,
+    active: String,
+    layers: Vec<LayerSnapshotV1>,
+    reference: Option<Vec<u8>>,
+}
+
+#[derive(Deserialize)]
+struct LayerSnapshotV1 {
+    p: LayerParamsV1,
+    buf: Vec<u8>,
+    mask: Option<Vec<u8>>,
+}
+
+#[derive(Deserialize)]
+struct LayerParamsV1 {
+    id: String,
+    name: String,
+    kind: LayerKind,
+    visible: bool,
+    opacity: f32,
+    blur: f32,
+    direction: f32,
+    strength: f32,
+    disturbance_enabled: bool,
+    disturbance: f32,
+    has_mask: bool,
+}
+
+impl ProjectV1 {
+    fn upgrade(self) -> ProjectData {
+        ProjectData {
+            version: FORMAT_VERSION,
+            size: self.size,
+            projection: self.projection,
+            polar_angle: self.polar_angle,
+            active: self.active,
+            reference: self.reference,
+            layers: self
+                .layers
+                .into_iter()
+                .map(|s| {
+                    let p = s.p;
+                    LayerSnapshot {
+                        p: super::LayerParams {
+                            id: p.id,
+                            name: p.name,
+                            kind: p.kind,
+                            visible: p.visible,
+                            opacity: p.opacity,
+                            effects: if p.blur > 0.0 { vec![LayerEffect::blur(p.blur)] } else { Vec::new() },
+                            legacy_blur: 0.0,
+                            direction: p.direction,
+                            strength: p.strength,
+                            disturbance_enabled: p.disturbance_enabled,
+                            disturbance: p.disturbance,
+                            has_mask: p.has_mask,
+                        },
+                        buf: s.buf,
+                        mask: s.mask,
+                        paths: Vec::new(),
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
 pub fn save_project(engine: &Engine, path: &str) -> Result<(), String> {
     let reference = engine.reference.as_ref().and_then(|r| {
         let img = image::RgbaImage::from_raw(r.w as u32, r.h as u32, r.data.clone())?;
@@ -297,11 +383,15 @@ pub fn load_project(path: &str) -> Result<Engine, String> {
         return Err("不是有效的 SkyFlow 工程文件".into());
     }
     let version = u32::from_le_bytes([raw[6], raw[7], raw[8], raw[9]]);
-    if version != FORMAT_VERSION {
-        return Err(format!("工程文件版本不匹配 (v{version})"));
-    }
     let body = zstd::stream::decode_all(&raw[10..]).map_err(|e| format!("解压失败: {e}"))?;
-    let proj: ProjectData = rmp_serde::from_slice(&body).map_err(|e| format!("解析失败: {e}"))?;
+    let proj: ProjectData = if version == 1 {
+        let v1: ProjectV1 = rmp_serde::from_slice(&body).map_err(|e| format!("解析失败: {e}"))?;
+        v1.upgrade()
+    } else if version == FORMAT_VERSION {
+        rmp_serde::from_slice(&body).map_err(|e| format!("解析失败: {e}"))?
+    } else {
+        return Err(format!("工程文件版本不匹配 (v{version})"));
+    };
 
     let mut engine = Engine::new(proj.size);
     engine.layers.clear();
@@ -317,8 +407,17 @@ pub fn load_project(path: &str) -> Result<Engine, String> {
             data: decompress_or(&m, expect),
         });
         let wind_dirty = s.p.kind == LayerKind::Wind;
+        let mut p = s.p;
+        // Effects used to be a bare `blur` radius on every layer. A project
+        // saved then still has one, so turn it into the effect it always
+        // meant — otherwise opening an old file would silently drop the
+        // softness you had dialled in, with nothing on screen to say why.
+        if p.effects.is_empty() && p.legacy_blur > 0.0 {
+            p.effects.push(LayerEffect::blur(p.legacy_blur));
+        }
+        p.legacy_blur = 0.0;
         engine.layers.push(super::LayerData {
-            p: s.p,
+            p,
             buf,
             mask,
             paths: s.paths,

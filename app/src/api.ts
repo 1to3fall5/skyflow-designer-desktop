@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { PathData } from './pen';
+import type { LayerEffect } from './effects';
 
 export type LayerKind = 'paint' | 'wind' | 'obstacle' | 'path';
 
@@ -10,7 +11,8 @@ export interface LayerInfo {
   kind: LayerKind;
   visible: boolean;
   opacity: number;
-  blur: number;
+  /** What is applied to the layer after its pixels exist — the `fx` badge. */
+  effects: LayerEffect[];
   direction: number;
   strength: number;
   disturbance_enabled: boolean;
@@ -58,7 +60,6 @@ export interface LayerPatch {
   name?: string;
   visible?: boolean;
   opacity?: number;
-  blur?: number;
   direction?: number;
   strength?: number;
   disturbance_enabled?: boolean;
@@ -147,6 +148,17 @@ export const api = {
    */
   setPaths: (id: string, paths: PathData[]) =>
     invoke<Snapshot>('set_paths', { id, paths }).catch(() => EMPTY),
+
+  /**
+   * Replace a layer's effects.
+   *
+   * Effects are whole-canvas by nature — blur reads a neighbourhood, so
+   * changing it moves pixels well outside any dirty rectangle — so this is the
+   * one edit that cannot be scoped. The list is a handful of small records,
+   * which is why sending it whole is cheap.
+   */
+  setEffects: (id: string, effects: LayerEffect[]) =>
+    invoke<Snapshot>('set_effects', { id, effects }).catch(() => EMPTY),
 };
 
 export { convertFileSrc };

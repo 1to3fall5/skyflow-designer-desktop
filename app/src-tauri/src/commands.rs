@@ -6,6 +6,7 @@ use tauri::{Manager, State};
 
 use crate::engine::io;
 use crate::engine::ops::Projection;
+use crate::engine::effect::LayerEffect;
 use crate::engine::path::PathData;
 use crate::engine::{Engine, LayerKind};
 
@@ -24,7 +25,9 @@ pub struct LayerInfo {
     pub kind: String,
     pub visible: bool,
     pub opacity: f32,
-    pub blur: f32,
+    /// What is applied to the layer after its pixels exist — the `fx` badge on
+    /// the layer row. The frontend edits this list and sends it back whole.
+    pub effects: Vec<LayerEffect>,
     pub direction: f32,
     pub strength: f32,
     pub disturbance_enabled: bool,
@@ -106,7 +109,6 @@ pub struct LayerPatch {
     pub name: Option<String>,
     pub visible: Option<bool>,
     pub opacity: Option<f32>,
-    pub blur: Option<f32>,
     pub direction: Option<f32>,
     pub strength: Option<f32>,
     pub disturbance_enabled: Option<bool>,
@@ -140,7 +142,7 @@ fn layer_info(l: &crate::engine::LayerData) -> LayerInfo {
         .into(),
         visible: l.p.visible,
         opacity: l.p.opacity,
-        blur: l.p.blur,
+        effects: l.p.effects.clone(),
         direction: l.p.direction,
         strength: l.p.strength,
         disturbance_enabled: l.p.disturbance_enabled,
@@ -367,15 +369,16 @@ pub fn update_layer(patch: LayerPatch, state: State<AppState>) -> Snapshot {
             if let Some(v) = patch.name { l.p.name = v; }
             if let Some(v) = patch.visible { l.p.visible = v; }
             if let Some(v) = patch.opacity { l.p.opacity = v; }
-            if let Some(v) = patch.blur { l.p.blur = v; }
             if let Some(v) = patch.direction { l.p.direction = v; l.wind_dirty = true; }
             if let Some(v) = patch.strength { l.p.strength = v; l.wind_dirty = true; }
             if let Some(v) = patch.disturbance_enabled { l.p.disturbance_enabled = v; }
             if let Some(v) = patch.disturbance { l.p.disturbance = v; }
         }
         // Every field here but `name` moves pixels everywhere: opacity and
-        // visibility re-scale the whole stack, blur and disturbance re-derive a
-        // whole-canvas field. Region-scoped compositing has to be told so.
+        // visibility re-scale the whole stack, direction and disturbance
+        // re-derive a whole-canvas field. Region-scoped compositing has to be
+        // told so. (Effects are not in this patch — they go through
+        // `set_effects`, which is whole-canvas by definition.)
         if !renames_only {
             e.full_dirty = true;
         }
@@ -407,6 +410,17 @@ pub fn add_layer(kind: String, state: State<AppState>) -> Snapshot {
 #[tauri::command]
 pub fn set_paths(id: String, paths: Vec<PathData>, state: State<AppState>) -> Snapshot {
     state.engine.lock().unwrap().set_paths(&id, paths);
+    emit(&state)
+}
+
+/// Replace a layer's effects.
+///
+/// The whole list goes over, like `set_paths`: it is a handful of small
+/// records, and the caller has the only copy that knows about the gesture
+/// being made. One round trip per drag frame, `save_history` at the end.
+#[tauri::command]
+pub fn set_effects(id: String, effects: Vec<LayerEffect>, state: State<AppState>) -> Snapshot {
+    state.engine.lock().unwrap().set_effects(&id, effects);
     emit(&state)
 }
 
