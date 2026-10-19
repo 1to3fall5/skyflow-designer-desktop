@@ -165,7 +165,56 @@ describe('the brush ring must never get stuck as an eyedropper', () => {
     // got stuck: the behaviour read the pointer, the appearance read the key.
     expect(paintView.match(/classList\.toggle\('picking'/g) ?? []).toHaveLength(1);
     expect(paintView).toMatch(/const showPicking = useCallback\(\(on: boolean\) => \{/);
-    expect(paintView).toMatch(/cursorRef\.current\?\.classList\.toggle\('picking', on\);/);
+    expect(paintView).toMatch(/cursorRef\.current\?\.classList\.toggle\('picking', want\);/);
+  });
+});
+
+describe('brush HUD: Alt + right drag, the way Photoshop sizes a brush', () => {
+  /**
+   * Photoshop puts this on the *right* button precisely because Alt + left is
+   * already the eyedropper in every tool. Preserving that split is what lets
+   * the two gestures coexist — and it is why the ring has to be handed back to
+   * the brush for the duration: `.picking` is `14px !important`.
+   */
+  it('takes the right button, because Alt + left is the eyedropper', () => {
+    expect(paintView).toMatch(/if \(e\.button === 2 && e\.altKey && !NON_PAINTING_TOOLS\.has\(p\.tool\)\) \{/);
+    expect(paintView).toMatch(/beginScrub\(e\);/);
+    // Ahead of the `button !== 0` bail-out, or a right press never gets here.
+    expect(paintView.indexOf('e.button === 2 && e.altKey'))
+      .toBeLessThan(paintView.indexOf('if (e.button !== 0) return;'));
+    // ...and still no painting: the press must not also lay down ink.
+    expect(paintView).not.toMatch(/e\.button === 2 && e\.altKey[\s\S]{0,80}drawing\.current = true/);
+  });
+
+  it('reads the scrub before the eyedropper, which Alt would otherwise win', () => {
+    const move = paintView.slice(
+      paintView.indexOf('const onPointerMove = (e: React.PointerEvent) => {'),
+      paintView.indexOf('const endStroke ='),
+    );
+    expect(move.indexOf('if (brushScrub.current)')).toBeGreaterThan(-1);
+    expect(move.indexOf('if (brushScrub.current)')).toBeLessThan(move.indexOf('if (picking.current)'));
+  });
+
+  it('maps X to diameter and Y to hardness, and down is harder', () => {
+    // Adobe only documents "drag up or down". Down is the direction that
+    // makes the brush harder, so `dy` — which grows downwards — adds.
+    expect(src).toMatch(/if \(dx\) setBrushSize\(\(s\) => clamp\(s \+ dx \* 0\.5, 1, 200\)\);/);
+    expect(src).toMatch(/if \(dy\) setBrushHardness\(\(s\) => clamp\(s \+ dy \* 0\.005, 0, 1\)\);/);
+    expect(src).toMatch(/onBrushScrub=\{scrubBrush\}/);
+  });
+
+  it('hands the ring back to the brush for the length of the gesture', () => {
+    expect(paintView).toMatch(/const want = on && !propsRef\.current\.adjusting\.current;/);
+    // Releasing the mouse is not releasing Alt: the crosshair comes back only
+    // if the key is actually still down.
+    expect(paintView).toMatch(/if \(endScrub\(\)\) \{ showPicking\(e\.altKey\); return; \}/);
+  });
+
+  it('scrubs in the 3D view too, without also turning the camera', () => {
+    expect(preview3D).toMatch(/if \(e\.button === 2 && e\.altKey && p\.paintEnabled\) \{/);
+    // The window mousedown listener is what arms the UE-style right-drag look;
+    // a press already scrubbing the brush must not arm it as well.
+    expect(preview3D).toMatch(/if \(e\.button === 2 && !ctx\.brushScrub\) ctx\.rightDown = true;/);
   });
 });
 

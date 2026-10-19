@@ -79,6 +79,14 @@ export interface PaintViewProps {
    * A ref, not state: it is read inside pointer handlers that must not re-render.
    */
   adjusting: React.MutableRefObject<boolean>;
+  /**
+   * Alt + right-drag scrub — Photoshop's brush HUD.
+   *
+   * `dx` / `dy` are screen px since the previous frame. X is diameter, Y is
+   * hardness, and **down is harder**: the HUD's Y axis reads like a slider
+   * being pushed down, not like a value going up.
+   */
+  onBrushScrub?: (dx: number, dy: number) => void;
   onStrokeEnd: () => void;
   onFillEnd: () => void;
   /**
@@ -221,6 +229,12 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
   // Alt gives you a *temporary* eyedropper; picking the tool makes it stick.
   // Without this distinction, releasing Alt mid-drag would keep sampling.
   const pickSticky = useRef(false);
+  /**
+   * Alt + right drag in progress — Photoshop's brush HUD. Holds the last
+   * pointer position, because the gesture is incremental: every frame adds
+   * however far the pointer has moved since the last one.
+   */
+  const brushScrub = useRef<{ x: number; y: number } | null>(null);
   /**
    * Whether Alt is down, as far as the *ring's appearance* is concerned.
    *
@@ -444,9 +458,13 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
   // Alt has to show the eyedropper the moment it goes down, without waiting
   // for the pointer to move.
   const showPicking = useCallback((on: boolean) => {
-    if (altHeld.current === on) return;
-    altHeld.current = on;
-    cursorRef.current?.classList.toggle('picking', on);
+    // A scrub outranks Alt. `.picking` is `14px !important`, so leaving the
+    // crosshair on for the length of an Alt+right drag would pin the ring at
+    // crosshair size — the one thing the gesture exists to change.
+    const want = on && !propsRef.current.adjusting.current;
+    if (altHeld.current === want) return;
+    altHeld.current = want;
+    cursorRef.current?.classList.toggle('picking', want);
   }, []);
 
   useEffect(() => {
@@ -820,6 +838,12 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
       beginView(e);
       return;
     }
+    // Alt + right drag = the brush HUD. Before the `button !== 0` bail-out,
+    // because a right press is otherwise nothing at all here.
+    if (e.button === 2 && e.altKey && !NON_PAINTING_TOOLS.has(p.tool)) {
+      beginScrub(e);
+      return;
+    }
     if (e.button !== 0) return;
     const { u, v } = getUV(e);
     // The pen is tested *before* the Alt eyedropper, because with a pen Alt
@@ -874,6 +898,17 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     // appearance against it. A `keyup` that went missing (lost focus, another
     // window) cannot survive one move of the mouse.
     if (e.altKey !== altHeld.current) showPicking(e.altKey);
+    // Alt + right drag. Read *before* the eyedropper: Alt is down for the whole
+    // gesture, so the eyedropper would otherwise claim every frame of it.
+    if (brushScrub.current) {
+      const s = brushScrub.current;
+      const dx = e.clientX - s.x;
+      const dy = e.clientY - s.y;
+      s.x = e.clientX;
+      s.y = e.clientY;
+      if (dx || dy) p.onBrushScrub?.(dx, dy);
+      return;
+    }
     // Dragging with Alt keeps sampling, the way Photoshop's eyedropper does.
     if (picking.current) {
       if (e.altKey || pickSticky.current) sample(u, v);
@@ -925,6 +960,9 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
 
   const endStroke = (e: React.PointerEvent) => {
     (e.target as Element).releasePointerCapture?.(e.pointerId);
+    // Releasing the mouse is not the same as releasing Alt, so the ring goes
+    // back to whatever Alt says *now* — still the crosshair if it is held.
+    if (endScrub()) { showPicking(e.altKey); return; }
     if (picking.current) {
       picking.current = false;
       // Releasing the mouse is not the same as releasing Alt: keep the
@@ -983,6 +1021,35 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
     e.stopPropagation();
     beginView(e);
+  };
+
+  /**
+   * Alt + right press: start the brush HUD.
+   *
+   * It has to be the *right* button. Alt + left is the eyedropper in every
+   * tool, and it stays that way — so the scrub takes the other one, exactly as
+   * Photoshop does (and for the same reason: Alt is already spoken for).
+   *
+   * `adjusting` is set here rather than by App because this is the same
+   * "the ring is being scrubbed" state the F keys produce: it freezes the ring
+   * where it is and hands the ring back to the brush.
+   */
+  const beginScrub = (e: React.PointerEvent) => {
+    propsRef.current.adjusting.current = true;
+    document.body.classList.add('adjusting');
+    brushScrub.current = { x: e.clientX, y: e.clientY };
+    // Alt is down, so the ring is the crosshair right now. `showPicking` is
+    // read through `adjusting`, so this also stops the next pointer move from
+    // putting the crosshair back.
+    showPicking(false);
+  };
+
+  const endScrub = (): boolean => {
+    if (!brushScrub.current) return false;
+    brushScrub.current = null;
+    propsRef.current.adjusting.current = false;
+    document.body.classList.remove('adjusting');
+    return true;
   };
 
   const endView = (e: React.PointerEvent) => {

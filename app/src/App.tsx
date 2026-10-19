@@ -282,6 +282,20 @@ export default function App() {
   const sharedCursor = useRef<CursorUV | null>(null);
   /** Set while F / Shift+F / Ctrl+F is being dragged to scrub a brush param. */
   const adjusting = useRef(false);
+
+  /**
+   * Alt + right drag — Photoshop's brush HUD.
+   *
+   * X is diameter and Y is hardness, and **down is harder**: the gesture reads
+   * as pushing the hardness slider down, not as a value going up. (Adobe's own
+   * docs only say "drag up or down"; the direction is down = harder.)
+   *
+   * Same rates as the F drags, so the two gestures feel like one tool.
+   */
+  const scrubBrush = useCallback((dx: number, dy: number) => {
+    if (dx) setBrushSize((s) => clamp(s + dx * 0.5, 1, 200));
+    if (dy) setBrushHardness((s) => clamp(s + dy * 0.005, 0, 1));
+  }, []);
   const flowCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const flowVersionRef = useRef(0);
   const cursorUVRef = useRef<{ u: number; v: number } | null>(null);
@@ -1280,6 +1294,10 @@ export default function App() {
               <Slider label="流量" value={brushFlow} min={0.01} max={1} step={0.01} onChange={setBrushFlow}
                 title="每一笔走完「到强度上限的剩余距离」的比例（类似 Photoshop 的流量）。流量 1 一笔到位；流量 0.25 要涂七八笔才接近上限，中间会把下层风向平滑地掰过来。" />
               <Slider label="硬度" value={brushHardness} min={0} max={1} step={0.01} onChange={setBrushHardness} />
+              {/* The gesture is undiscoverable: it is a modifier plus the button
+                  you never press. Photoshop has the same problem and solves it
+                  the same way — by saying it somewhere. */}
+              <span className="ob-hint">Alt + 右键拖动：左右改大小，上下改硬度</span>
             </>
           )}
 
@@ -1398,6 +1416,7 @@ export default function App() {
               wrap={state.projection !== 'planar'}
               cursorUV={sharedCursor}
               adjusting={adjusting}
+              onBrushScrub={scrubBrush}
               onStrokeEnd={() => { api.saveHistory(); void refreshThumbs(); }}
               onFillEnd={() => { api.saveHistory(); void refreshThumbs(); }}
               onPenInfo={setPenInfo}
@@ -1435,6 +1454,7 @@ export default function App() {
               brushHardness={brushHardness}
               cursorUV={sharedCursor}
               adjusting={adjusting}
+              onBrushScrub={scrubBrush}
               projection={state.projection}
               polarAngle={state.polar_angle}
               tool={tool}

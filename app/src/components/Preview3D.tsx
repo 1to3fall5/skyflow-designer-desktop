@@ -94,6 +94,8 @@ export interface Preview3DProps {
   cursorUV: React.MutableRefObject<CursorUV | null>;
   /** True while a brush parameter is being scrubbed — freezes the ring. */
   adjusting: React.MutableRefObject<boolean>;
+  /** Alt + right-drag scrub: `dx` is diameter, `dy` is hardness (down = harder). */
+  onBrushScrub?: (dx: number, dy: number) => void;
   projection: Projection;
   polarAngle: number;
   paintEnabled: boolean;
@@ -201,6 +203,8 @@ export const Preview3D = React.forwardRef<Preview3DHandle, Preview3DProps>((prop
     planeAspect: number;
     dragging: boolean;
     rightDown: boolean;
+    /** Alt + right drag — the brush HUD. Also what keeps `rightDown` off. */
+    brushScrub: { x: number; y: number } | null;
     keys: Record<string, boolean>;
     localHover: boolean;
     lastProj: Projection | null;
@@ -303,6 +307,7 @@ export const Preview3D = React.forwardRef<Preview3DHandle, Preview3DProps>((prop
       planeAspect: 2,
       dragging: false,
       rightDown: false,
+      brushScrub: null as { x: number; y: number } | null,
       keys: {} as Record<string, boolean>,
       localHover: false,
       lastProj: null as Projection | null,
@@ -383,6 +388,17 @@ export const Preview3D = React.forwardRef<Preview3DHandle, Preview3DProps>((prop
 
     const onDown = (e: PointerEvent) => {
       const p = propsRef.current;
+      // Alt + right drag = the brush HUD, same as the 2D view. It has to win
+      // over the UE-style right-drag look: Alt is the eyedropper on the left
+      // button, so the scrub lives on the right one. `onWinMouseDown` below
+      // checks `brushScrub` and leaves the camera alone for the duration.
+      if (e.button === 2 && e.altKey && p.paintEnabled) {
+        p.adjusting.current = true;
+        document.body.classList.add('adjusting');
+        ctx.brushScrub = { x: e.clientX, y: e.clientY };
+        try { el.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+        return;
+      }
       if (e.button === 2) { ctx.rightDown = true; return; }
       if (!p.paintEnabled || e.button !== 0) return;
       const uv = toUV(e);
@@ -413,6 +429,16 @@ export const Preview3D = React.forwardRef<Preview3DHandle, Preview3DProps>((prop
       const p = propsRef.current;
       const uv = toUV(e);
       ctx.localHover = !!uv && p.paintEnabled;
+      // Alt + right drag: diameter on X, hardness on Y (down is harder). Read
+      // before the eyedropper, which would otherwise claim every frame of it.
+      if (ctx.brushScrub) {
+        const dx = e.clientX - ctx.brushScrub.x;
+        const dy = e.clientY - ctx.brushScrub.y;
+        ctx.brushScrub.x = e.clientX;
+        ctx.brushScrub.y = e.clientY;
+        if (dx || dy) p.onBrushScrub?.(dx, dy);
+        return;
+      }
       if (uv) {
         const c = canvasUV(uv);
         p.cursorUV.current = nextCursor(p.adjusting.current, c, p.cursorUV.current);
@@ -431,6 +457,14 @@ export const Preview3D = React.forwardRef<Preview3DHandle, Preview3DProps>((prop
     };
 
     const onUp = (e: PointerEvent) => {
+      const p = propsRef.current;
+      if (ctx.brushScrub) {
+        ctx.brushScrub = null;
+        p.adjusting.current = false;
+        document.body.classList.remove('adjusting');
+        try { el.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+        return;
+      }
       if (e.button === 2) { ctx.rightDown = false; return; }
       if (pickingRef.current) { pickingRef.current = false; return; }
       if (!paintingRef.current) return;
@@ -452,7 +486,11 @@ export const Preview3D = React.forwardRef<Preview3DHandle, Preview3DProps>((prop
     el.addEventListener('pointerleave', onLeave);
 
     // -- UE-style right-drag look + WASDQE fly -----------------------------
-    const onWinMouseDown = (e: MouseEvent) => { if (e.button === 2) ctx.rightDown = true; };
+    const onWinMouseDown = (e: MouseEvent) => {
+      // A right press that is already scrubbing the brush must not also turn
+      // the camera. Pointerdown lands first, so `brushScrub` is set by now.
+      if (e.button === 2 && !ctx.brushScrub) ctx.rightDown = true;
+    };
     const onWinMouseUp = (e: MouseEvent) => { if (e.button === 2) ctx.rightDown = false; };
     const onWinMouseMove = (e: MouseEvent) => {
       if (!ctx.rightDown) return;
