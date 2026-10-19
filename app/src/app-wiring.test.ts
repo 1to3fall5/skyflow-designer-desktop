@@ -333,6 +333,60 @@ describe('eyedropper: Alt picks up the flow strength, like Photoshop', () => {
   });
 });
 
+describe('view zoom: about the pointer, and from anywhere in the pane', () => {
+  /**
+   * Scaling about the middle of the image meant the thing you were aiming at
+   * slid out from under the cursor — you zoom in, lose your place, zoom out
+   * again. And because the gesture was owned by the canvas, it died the moment
+   * the pointer left the square, which is exactly when you want to pull back
+   * and see the whole flowmap.
+   */
+  it('does the arithmetic in a pure function, where it can be tested', () => {
+    // `zoomAbout` holds a screen point fixed across a change of scale; that is
+    // the whole contract, and it is arithmetic rather than DOM.
+    expect(paintView).toMatch(/import \{ stageCentre, zoomAbout \} from '\.\.\/view';/);
+    expect(paintView).toMatch(/transform\.current = zoomAbout\(t, next, c\.x, c\.y, mx, my\);/);
+    expect(paintView).not.toMatch(/t\.scale = s;/);
+  });
+
+  it('recovers the untransformed centre from the box it can measure', () => {
+    // Not the offsetParent chain: the centre of a box scaled about its centre
+    // is exactly `centre + translate`.
+    expect(paintView).toMatch(/stageCentre\(el\.getBoundingClientRect\(\), t\)/);
+  });
+
+  it('anchors a drag on where it started, not on the live cursor', () => {
+    // The point you aimed at when you pressed is the one that has to stay put;
+    // following the cursor would slide the whole view sideways while zooming.
+    expect(paintView).toMatch(/zoomAt\(zs\.startScale \* \(1 - \(e\.clientY - zs\.y\) \* 0\.005\), zs\.x, zs\.y\)/);
+    expect(paintView).toMatch(/zoomStart\.current = \{ x: e\.clientX, y: e\.clientY, startScale:/);
+  });
+
+  it('zooms the wheel about the pointer too', () => {
+    // A wheel that zooms about the middle of the image alongside a drag that
+    // zooms about the cursor is two gestures disagreeing about what "zoom"
+    // means.
+    expect(paintView).toMatch(/zoomAt\(transform\.current\.scale - e\.deltaY \* 0\.0015, e\.clientX, e\.clientY\)/);
+  });
+
+  it('starts a middle drag off the artwork, not only on it', () => {
+    // Capture phase on the pane, so the canvas never sees a press that was not
+    // on the image — otherwise it would read a UV off it.
+    expect(paintView).toMatch(/onPointerDownCapture=\{onViewDown\}/);
+    expect(paintView).toMatch(/const onViewDown = \(e: React\.PointerEvent\) => \{/);
+    expect(paintView).toMatch(/if \(e\.button !== 1\) return;/);
+    expect(paintView).toMatch(/e\.currentTarget as Element\)\.setPointerCapture\?\.\(e\.pointerId\)/);
+    expect(paintView).toMatch(/e\.stopPropagation\(\);/);
+  });
+
+  it('shares one move handler between the canvas and the pane', () => {
+    // Whichever element holds the capture, the drag runs the same code — and
+    // the target scale is absolute, so a move seen by both is applied once.
+    expect(paintView).toMatch(/onPointerMove=\{\(e\) => moveView\(e\)\}/);
+    expect(paintView).toMatch(/if \(moveView\(e\)\) return;/);
+  });
+});
+
 describe('2D stage: the flowmap square must never be distorted', () => {
   /**
    * The flowmap is a square UV space, so the stage has to stay square whatever

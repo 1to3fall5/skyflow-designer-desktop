@@ -2,6 +2,7 @@ import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef,
 import { api, nextStrokeId, decodeBase64, toImageData, Snapshot } from '../api';
 import { nextCursor, shouldClearOnLeave, type CursorUV } from '../cursor';
 import { brushGradient } from '../brush';
+import { stageCentre, zoomAbout } from '../view';
 import {
   CLOSE_PX, flattenPath, uvDistPx, hitPath,
   translatePath, withAnchor, insertAnchor, removeAnchor, withBrush,
@@ -194,6 +195,7 @@ function syncRingSize(el: HTMLElement, brushSize: number, size: number, hardness
   }
 }
 
+
 const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const arrowRef = useRef<HTMLCanvasElement>(null);
@@ -235,7 +237,8 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
    */
   const altHeld = useRef(false);
   const panStart = useRef<{ x: number; y: number } | null>(null);
-  const zoomStart = useRef<{ y: number; startScale: number } | null>(null);
+  /** `x`/`y` are where the gesture started: the point that must stay put. */
+  const zoomStart = useRef<{ x: number; y: number; startScale: number } | null>(null);
   const rafId = useRef(0);
   const arrowTimer = useRef(0);
 
@@ -270,6 +273,70 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     el.style.transform = `translate(${t.x}px, ${t.y}px) scale(${t.scale})`;
     propsRef.current.onZoom?.(t.scale);
   }, []);
+
+  /**
+   * Zoom about a screen point, so whatever is under the cursor stays there.
+   *
+   * `.paint-stage` is transformed `translate` then `scale`, about its own
+   * centre, so a point X lands at `C + T + s * (X - C)`. Holding the cursor `M`
+   * fixed while `s` changes is one line of algebra:
+   *
+   * ```text
+   * T1 = (M - C) * (1 - k) + k * T0        where k = s1 / s0
+   * ```
+   *
+   * `C`, the *untransformed* centre, comes out of the current box for free:
+   * the centre of a box scaled about its centre is exactly `C + T`.
+   *
+   * The target scale is absolute, not a step from the current one, so calling
+   * this twice with the same pointer does nothing the second time — which is
+   * what lets both the canvas and the pane around it handle the same move
+   * without the two compounding.
+   */
+  const zoomAt = useCallback((next: number, mx: number, my: number) => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const t = transform.current;
+    const c = stageCentre(el.getBoundingClientRect(), t);
+    transform.current = zoomAbout(t, next, c.x, c.y, mx, my);
+    applyTransform();
+  }, [applyTransform]);
+
+  /** Ctrl + middle drag = zoom, plain middle drag = pan. */
+  const beginView = (e: React.PointerEvent) => {
+    if (e.ctrlKey) {
+      zooming.current = true;
+      zoomStart.current = { x: e.clientX, y: e.clientY, startScale: transform.current.scale };
+    } else {
+      panning.current = true;
+      panStart.current = { x: e.clientX - transform.current.x, y: e.clientY - transform.current.y };
+    }
+  };
+
+  /**
+   * One frame of a zoom / pan drag. Returns whether it consumed the move.
+   *
+   * Lives on its own because the gesture can start *outside* the artwork — see
+   * `onViewDown` — and then no pointer event ever reaches the canvas.
+   */
+  const moveView = useCallback((e: React.PointerEvent) => {
+    if (zooming.current && zoomStart.current) {
+      const zs = zoomStart.current;
+      // Anchored on where the gesture started, not on where the pointer is
+      // now. The point you aimed at when you pressed is the one that has to
+      // stay put; anchoring on the live cursor makes the whole view slide
+      // sideways while you zoom.
+      zoomAt(zs.startScale * (1 - (e.clientY - zs.y) * 0.005), zs.x, zs.y);
+      return true;
+    }
+    if (panning.current && panStart.current) {
+      transform.current.x = e.clientX - panStart.current.x;
+      transform.current.y = e.clientY - panStart.current.y;
+      applyTransform();
+      return true;
+    }
+    return false;
+  }, [applyTransform, zoomAt]);
 
   const applySnapshot = useCallback((s: Snapshot) => {
     const canvas = canvasRef.current;
@@ -746,18 +813,11 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
   const onPointerDown = (e: React.PointerEvent) => {
     const p = propsRef.current;
     (e.target as Element).setPointerCapture?.(e.pointerId);
-    // Ctrl/Cmd + middle drag = zoom (vertical drag), matching the original.
-    if (e.ctrlKey && e.button === 1) {
-      zooming.current = true;
-      zoomStart.current = { y: e.clientY, startScale: transform.current.scale };
-      return;
-    }
-    // Panning is the middle button, in both views. Alt used to be an alias for
-    // it (the original web app did that), but it now belongs to the eyedropper,
-    // which is what Alt means in Photoshop.
+    // Middle drag: Ctrl/Cmd + vertical drag = zoom, plain = pan. Both are
+    // shared with the pane around the artwork, so they must go through the
+    // same entry point whether they started on the canvas or beside it.
     if (e.button === 1) {
-      panning.current = true;
-      panStart.current = { x: e.clientX - transform.current.x, y: e.clientY - transform.current.y };
+      beginView(e);
       return;
     }
     if (e.button !== 0) return;
@@ -835,19 +895,9 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
         syncRingSize(cur, p.brushSize, p.size, p.brushHardness);
       }
     }
-    if (zooming.current && zoomStart.current) {
-      const zs = zoomStart.current;
-      const s = Math.max(0.1, Math.min(10, zs.startScale * (1 - (e.clientY - zs.y) * 0.005)));
-      transform.current.scale = s;
-      applyTransform();
-      return;
-    }
-    if (panning.current && panStart.current) {
-      transform.current.x = e.clientX - panStart.current.x;
-      transform.current.y = e.clientY - panStart.current.y;
-      applyTransform();
-      return;
-    }
+    // Zooming and panning are handled by `moveView`, shared with the pane
+    // around the canvas so a middle drag can start off the artwork.
+    if (moveView(e)) return;
     // A committed path is being dragged: an anchor, a handle, or the whole
     // thing. Comes first because it is the most specific thing a drag can mean.
     if (edit.current) {
@@ -913,9 +963,38 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
   };
 
   const onWheel = (e: React.WheelEvent) => {
-    const t = transform.current;
-    t.scale = Math.max(0.1, Math.min(12, t.scale - e.deltaY * 0.0015));
-    applyTransform();
+    // About the pointer, like everywhere else — a wheel that zooms about the
+    // middle of the image walks away from whatever you were looking at.
+    zoomAt(transform.current.scale - e.deltaY * 0.0015, e.clientX, e.clientY);
+  };
+
+  /**
+   * A middle press anywhere in the pane, artwork or not.
+   *
+   * The canvas cannot own this: a press in the dark surround never reaches it,
+   * so zooming and panning used to die the moment the pointer left the square —
+   * which is exactly when you most want to zoom out and see the whole thing.
+   */
+  const onViewDown = (e: React.PointerEvent) => {
+    if (e.button !== 1) return;
+    // Captured on the pane, so the drag survives crossing on and off the
+    // artwork. Stopped before the canvas, which would otherwise read a UV off
+    // a press that was never on the image.
+    (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+    e.stopPropagation();
+    beginView(e);
+  };
+
+  const endView = (e: React.PointerEvent) => {
+    (e.target as Element).releasePointerCapture?.(e.pointerId);
+    if (zooming.current) {
+      zooming.current = false;
+      zoomStart.current = null;
+    }
+    if (panning.current) {
+      panning.current = false;
+      panStart.current = null;
+    }
   };
 
   // The ring is sized imperatively, so slider edits (which never fire a pointer
@@ -932,7 +1011,11 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
   }, [props.showArrows, props.arrowDensity, props.size, refreshArrows]);
 
   return (
-    <div className="paint-view" onWheel={onWheel}>
+    <div className="paint-view" onWheel={onWheel}
+      onPointerDownCapture={onViewDown}
+      onPointerMove={(e) => moveView(e)}
+      onPointerUp={endView}
+      onPointerCancel={endView}>
       <div ref={wrapRef} className="paint-stage">
         <canvas
           ref={canvasRef}
