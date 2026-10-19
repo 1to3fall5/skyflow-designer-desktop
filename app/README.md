@@ -311,6 +311,19 @@ PS 的规则相反——面板里的控件是**固定的一组**，不适用的�
   `swallowClick` 吃掉正好一次——否则刚拖完面板，它又被折叠了。
 - 图层行同样改成指针事件，所以图层顺序现在真的可以拖了（以前只有 ▲▼ 按钮能用）。
 
+#### `setPointerCapture` 不能在 `pointerdown` 里调
+
+指针捕获**连同兼容鼠标事件一起重定向**，所以按下时捕获，紧接着的那次 `click`
+就会落在大元素上、而不是你真正按到的东西上。图层行是可拖的，而眼睛按钮在行
+里面——于是点眼睛变成「click 落在行上」：`updateLayer` 根本没跑，眼睛纹丝不动，
+表现就是**显示/隐藏失效**，而且看着像"只是选中了这一层"。
+
+捕获挪到**过了阈值之后**：那时已经没有 click 可丢了。代价是阈值之前没有捕获，
+所以 `pointermove` 得挂在 `window` 上——否则横向一甩就出行，4px 还没攒够，
+手势就永远起不来。
+
+面板标题栏不受影响，因为捕获元素和点击元素就是同一个 `<button>`。
+
 ### 面板里放状态，菜单里放动作
 
 这是这一轮 reorganise 的唯一标准，PS 一直这么分：
@@ -604,7 +617,7 @@ npx tauri build        # 产出 NSIS / MSI 安装包，约 3 分钟
 ## 测试
 
 ```bash
-npm test          # 前端 290 + Rust 90，共 380 个用例
+npm test          # 前端 293 + Rust 90，共 383 个用例
 npm run test:fe   # 仅前端（vitest）
 npm run test:rust # 仅引擎（cargo test）
 npm run test:watch
@@ -618,7 +631,8 @@ npm run test:watch
   DOM 层 drop 都被吞掉，而应用自己的 `Ctrl+S/O/N/Z/Y/E/F` 必须放行。
 - `src/app-wiring.test.ts` — 源码级约定：结构性命令不得走只推像素的 `applySnap`、
   调整层必须落到遮罩、不得重新引入指针锁定；视图缩放必须走 `zoomAbout`（不许
-  直接写 `t.scale`），且中键手势挂在窗格的捕获阶段。
+  直接写 `t.scale`），且中键手势挂在窗格的捕获阶段；`setPointerCapture` 必须在
+  拖拽阈值之后（否则行内按钮的 click 会被吞）。
 - `src/view.test.ts` — 视图变换是纯函数：`project` / `unproject` 往返、中心不动、
   **指针底下那一点缩放前后不动**（3 组初始变换 × 3 个指针位置 × 4 个目标缩放）、
   指针压在画面中心时不平移视图、目标缩放相同则原样返回、到上下限仍咬住锚点。

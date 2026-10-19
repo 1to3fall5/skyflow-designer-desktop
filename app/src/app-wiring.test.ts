@@ -460,6 +460,53 @@ describe('layer order: the stack has to be rearrangeable', () => {
     expect(src).toMatch(/if \(Math\.abs\(ev\.clientY - startY\) < DRAG_MIN_PX\) return;/);
   });
 
+  /**
+   * Capturing on `pointerdown` instead — the obvious place — silently killed
+   * 显示/隐藏. Pointer capture retargets the compatibility mouse events too,
+   * so the `click` that follows a press lands on the capture element rather
+   * than on what was actually pressed. The eye lives *inside* the draggable
+   * row, so its click arrived as a click on the row: `updateLayer` never ran
+   * and the eye never changed. The symptom was "点眼睛只是选中了这一层".
+   *
+   * Past the threshold there is no click left to lose, so capturing there
+   * keeps the drag working and leaves plain clicks alone.
+   */
+  it('captures the pointer only once the press has become a drag', () => {
+    const body = src.slice(
+      src.indexOf('function beginPointerReorder('),
+      src.indexOf('const START_COLLAPSED'),
+    );
+    expect(body).not.toBe('');
+    const threshold = body.indexOf('if (Math.abs(ev.clientY - startY) < DRAG_MIN_PX) return;');
+    const started = body.indexOf('started = true;');
+    const capture = body.indexOf('setPointerCapture');
+    expect(threshold).toBeGreaterThan(-1);
+    expect(started).toBeGreaterThan(threshold);
+    expect(capture).toBeGreaterThan(started);
+  });
+
+  it('hears the pre-threshold moves from the window, not from the row', () => {
+    // With capture deferred there is nothing holding the pointer to the row
+    // yet, and a press that slides out of a 28px row in under 4px of vertical
+    // travel would otherwise never reach the threshold.
+    const body = src.slice(
+      src.indexOf('function beginPointerReorder('),
+      src.indexOf('const START_COLLAPSED'),
+    );
+    expect(body).toMatch(/window\.addEventListener\('pointermove', move\);/);
+    expect(body).toMatch(/window\.addEventListener\('pointerup', up\);/);
+    expect(body).not.toMatch(/el\.addEventListener\('pointermove'/);
+  });
+
+  it('gives the row\'s eye a click the row cannot swallow', () => {
+    expect(src).toMatch(
+      /onClick=\{\(e\) => \{ e\.stopPropagation\(\); updateLayer\(l\.id, \{ visible: !l\.visible \}\); \}\}/,
+    );
+    // Eye when shown, hollow square when hidden — a column of glyphs you can
+    // scan without reading a single name.
+    expect(src).toMatch(/<ToolIcon name=\{l\.visible \? 'eye' : 'sq'\}/);
+  });
+
   it('offers buttons as well, because a drag handle is undiscoverable', () => {
     expect(src).toMatch(/disabled=\{!canMoveUp\} onClick=\{\(\) => moveActive\(-1\)\}/);
     expect(src).toMatch(/disabled=\{!canMoveDown\} onClick=\{\(\) => moveActive\(1\)\}/);

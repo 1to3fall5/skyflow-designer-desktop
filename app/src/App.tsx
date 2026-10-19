@@ -92,14 +92,28 @@ function beginPointerReorder(
     if (!started) {
       if (Math.abs(ev.clientY - startY) < DRAG_MIN_PX) return;
       started = true;
+      // Capture **here**, not on pointerdown.
+      //
+      // Pointer capture retargets the compatibility mouse events as well as
+      // the pointer events, so capturing at pointerdown moves the `click`
+      // that follows from whatever was pressed to the capture element. A
+      // press on a button *inside* a draggable row therefore arrives as a
+      // click on the row: the button's handler never runs and the row's does.
+      // That is precisely how 显示/隐藏 died — pressing the eye selected the
+      // layer instead of toggling it, and the eye never changed.
+      //
+      // Past the threshold there is no click left to lose, and capture is
+      // what keeps the moves coming once the pointer has left a 28px-tall
+      // row — which it will, immediately.
+      try { el.setPointerCapture(e.pointerId); } catch { /* gone */ }
     }
     over = hit(ev.clientY);
     on(over, 'move');
   };
   const finish = (phase: 'end' | 'cancel') => {
-    el.removeEventListener('pointermove', move);
-    el.removeEventListener('pointerup', up);
-    el.removeEventListener('pointercancel', cancel);
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    window.removeEventListener('pointercancel', cancel);
     // Capture is released on pointerup anyway; this is the cancel path.
     try { el.releasePointerCapture(e.pointerId); } catch { /* already gone */ }
     if (started) on(over, phase);
@@ -107,12 +121,12 @@ function beginPointerReorder(
   const up = () => finish('end');
   const cancel = () => finish('cancel');
 
-  // Capture, so the moves keep coming even once the pointer has left the
-  // 28px-tall header — which it will, immediately.
-  el.setPointerCapture(e.pointerId);
-  el.addEventListener('pointermove', move);
-  el.addEventListener('pointerup', up);
-  el.addEventListener('pointercancel', cancel);
+  // On `window`, not `el`: before the threshold there is no capture yet, and
+  // a press that slides sideways out of a 28px row in under 4px of vertical
+  // travel would otherwise strand the gesture before it could ever start.
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+  window.addEventListener('pointercancel', cancel);
 }
 
 /**
