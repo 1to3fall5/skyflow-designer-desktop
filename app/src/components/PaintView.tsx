@@ -71,6 +71,14 @@ export interface PaintViewProps {
   referenceSrc: string | null;
   showArrows: boolean;
   arrowDensity: number;
+  /**
+   * Flow animation, in the same units the 3D preview uses. 0 is paused.
+   *
+   * The 2D view has no texture to push around, so what it animates is the
+   * thing that actually shows the flow: the arrows. Without this the 播放开关
+   * did nothing at all in 2D, while `animating` starts out true.
+   */
+  animSpeed: number;
   wrap: boolean;
   /** Shared cursor published to the 3D view (canvas coordinates). */
   cursorUV: React.MutableRefObject<CursorUV | null>;
@@ -277,6 +285,8 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
   const edit = useRef<Edit | null>(null);
   /** Set when `edit` moved and the engine has not seen it yet. */
   const editDirty = useRef(false);
+  /** How far the arrow dashes have marched. Kept so a re-sample lands in phase. */
+  const animDash = useRef<number | null>(null);
   /** One round trip in flight, so a slow frame cannot land out of order. */
   const editBusy = useRef(false);
 
@@ -361,6 +371,43 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     ctx.putImageData(toImageData(bytes, s.w, s.h), s.x, s.y);
   }, []);
 
+  /**
+   * The arrow geometry, kept so animation frames never re-read the canvas.
+   *
+   * Re-sampling means a `drawImage` down to 128² plus a `getImageData` — far
+   * too much to do 60 times a second, and it only changes when the pixels do.
+   * The two paths are built once too, so a frame is: clear, one dashed
+   * stroke, one fill.
+   */
+  const arrowGeom = useRef<{ shaft: Path2D; head: Path2D; step: number } | null>(null);
+
+  /** Draw the cached arrows. `dash` is the marching offset, or null for solid. */
+  const drawArrows = useCallback((dash: number | null) => {
+    const ac = arrowRef.current;
+    const g = arrowGeom.current;
+    if (!ac) return;
+    const ctx = ac.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, ac.width, ac.height);
+    if (!g) return;
+    const d = Math.max(3, g.step * 0.16);
+    if (dash !== null) {
+      // The shafts run tail -> head, so a *decreasing* offset carries the
+      // dashes downstream. Increasing it would make the field flow backwards,
+      // which is worse than not animating at all.
+      ctx.setLineDash([d, d * 1.15]);
+      ctx.lineDashOffset = -dash;
+    } else {
+      ctx.setLineDash([]);
+    }
+    ctx.strokeStyle = 'rgba(251, 191, 36, 0.6)';
+    ctx.fillStyle = 'rgba(251, 191, 36, 0.6)';
+    ctx.lineWidth = 1;
+    ctx.stroke(g.shaft);
+    ctx.fill(g.head);
+    ctx.setLineDash([]);
+  }, []);
+
   const refreshArrows = useCallback(() => {
     const ac = arrowRef.current;
     const src = canvasRef.current;
@@ -369,7 +416,7 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     const ctx = ac.getContext('2d');
     if (!ctx) return;
     ctx.clearRect(0, 0, ac.width, ac.height);
-    if (!p.showArrows) return;
+    if (!p.showArrows) { arrowGeom.current = null; return; }
 
     if (!sampleRef.current) {
       const s = document.createElement('canvas');
@@ -414,12 +461,9 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
         head.closePath();
       }
     }
-    ctx.strokeStyle = 'rgba(251, 191, 36, 0.6)';
-    ctx.fillStyle = 'rgba(251, 191, 36, 0.6)';
-    ctx.lineWidth = 1;
-    ctx.stroke(shaft);
-    ctx.fill(head);
-  }, []);
+    arrowGeom.current = { shaft, head, step };
+    drawArrows(animDash.current);
+  }, [drawArrows]);
 
   // -- flush loop: one IPC per animation frame, not per pointer event -----
   useEffect(() => {
@@ -1076,6 +1120,39 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
   useEffect(() => {
     refreshArrows();
   }, [props.showArrows, props.arrowDensity, props.size, refreshArrows]);
+
+  /**
+   * March the arrow dashes downstream.
+   *
+   * `animating` starts out true, so before this the 播放开关 was a switch that
+   * moved nothing in the 2D view — the one place you most want to see which
+   * way the field runs. The 3D preview pushes a texture around; there is no
+   * texture here, so what moves is the thing that *is* the flow: the arrows.
+   *
+   * Paused is not "phase 0": it draws the solid arrows again, because solid
+   * shafts are what you want when you are reading a still frame.
+   */
+  useEffect(() => {
+    const p = propsRef.current;
+    if (!p.showArrows || p.animSpeed <= 0) {
+      animDash.current = null;
+      drawArrows(null);
+      return;
+    }
+    let raf = 0;
+    let last = performance.now();
+    const tick = (now: number) => {
+      const dt = Math.min((now - last) / 1000, 0.1);
+      last = now;
+      // One grid cell per second at speed 1: fast enough to read as flow,
+      // slow enough that the arrows are still arrows.
+      animDash.current = (animDash.current ?? 0) + dt * p.animSpeed * (p.size / 8);
+      drawArrows(animDash.current);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [props.showArrows, props.animSpeed, props.arrowDensity, props.size, drawArrows]);
 
   return (
     <div className="paint-view" onWheel={onWheel}

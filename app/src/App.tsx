@@ -823,6 +823,12 @@ export default function App() {
   // (wind / obstacle) have no content of their own to paint into.
   const isAdj = activeLayer ? GENERATED.has(activeLayer.kind) : false;
   const canFx = activeLayer ? !NO_FX.has(activeLayer.kind) : false;
+  /**
+   * One number for both views, so 播放动画 means the same thing on either side
+   * of the split. It has to be a single value: the 3D preview reads it from a
+   * shader uniform every frame, and the 2D view drives its arrows from it.
+   */
+  const animSpeed = animating ? speed : 0;
 
   // ---- workspace split ----
   const workspaceRef = useRef<HTMLDivElement>(null);
@@ -1472,6 +1478,7 @@ export default function App() {
               referenceSrc={refSrc}
               showArrows={showArrows}
               arrowDensity={arrowDensity}
+              animSpeed={animSpeed}
               wrap={state.projection !== 'planar'}
               cursorUV={sharedCursor}
               adjusting={adjusting}
@@ -1501,7 +1508,7 @@ export default function App() {
               flowCanvasRef={flowCanvasRef}
               flowVersionRef={flowVersionRef}
               skyUrl={skyUrl}
-              speed={animating ? speed : 0}
+              speed={animSpeed}
               distortion={distortion}
               showFlowMap={showFlowMap}
               flowMapOpacity={flowMapOpacity}

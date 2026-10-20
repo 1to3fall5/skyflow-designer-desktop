@@ -351,6 +351,45 @@ describe('brush: strength is the ceiling, 透明度 is the rate', () => {
   });
 });
 
+describe('2D flow animation: the arrows have to move', () => {
+  /**
+   * `animating` starts out true, and the 播放开关 used to move nothing at all
+   * in the 2D view — the one place you most want to see which way the field
+   * runs. The 3D preview pushes a texture around; there is no texture in 2D,
+   * so what moves is the thing that *is* the flow: the arrows.
+   */
+  it('drives the 2D arrows from the same speed the 3D preview uses', () => {
+    expect(src).toMatch(/const animSpeed = animating \? speed : 0;/);
+    expect(src).toMatch(/animSpeed=\{animSpeed\}/);
+    expect(paintView).toMatch(/animSpeed: number;/);
+  });
+
+  it('marches the dashes downstream, not upstream', () => {
+    // The shafts are built tail -> head, so a *growing* offset would carry the
+    // dashes against the flow — worse than not animating. Checked in a real
+    // Chromium: offset -3 puts the first dash 3px further along the shaft.
+    expect(paintView).toMatch(/ctx\.lineDashOffset = -dash;/);
+  });
+
+  it('does not re-sample the composite on every frame', () => {
+    // Sampling is a drawImage down to 128² plus a getImageData — fine on a
+    // stroke, far too much at 60 Hz. It only runs when the pixels change.
+    expect(paintView).toMatch(/arrowGeom\.current = \{ shaft, head, step \};/);
+    const draw = paintView.slice(
+      paintView.indexOf('const drawArrows = useCallback'),
+      paintView.indexOf('const refreshArrows = useCallback'),
+    );
+    expect(draw).not.toMatch(/getImageData/);
+  });
+
+  it('goes back to solid arrows when paused', () => {
+    // A still frame is *read* — dashed shafts only pay off in motion.
+    expect(paintView).toMatch(
+      /if \(!p\.showArrows \|\| p\.animSpeed <= 0\) \{[\s\S]*?animDash\.current = null;[\s\S]*?drawArrows\(null\);/,
+    );
+  });
+});
+
 describe('number keys: Photoshop opacity, on the brush or on the layer', () => {
   /**
    * PS decides between tool opacity and layer opacity by which tool is out.
