@@ -296,12 +296,12 @@ describe('brush: strength is the ceiling, 透明度 is the rate', () => {
     expect(src).toMatch(/const \[brushStrength, setBrushStrength\]/);
   });
 
-  it('reads 透明度 the way the label does: full slider is opaque', () => {
-    // The slider itself is still bound to the rate — right is 一笔到位, like
-    // Photoshop's opacity — so the number has to be the *transparency*, or a
-    // label saying 透明度 would print 100% for the one setting that hides
-    // nothing at all.
-    expect(src).toMatch(/display=\{`\$\{Math\.round\(\(1 - brushFlow\) \* 100\)\}%`\}/);
+  it('prints 透明度 in the units the number keys type in', () => {
+    // The slider reads the way Photoshop's opacity slider reads — full is
+    // 100% and 一笔到位 — because `4` has to land on 40%. Printing the exact
+    // complement instead would make the number keys look broken: press 4,
+    // watch the slider jump to 60.
+    expect(src).toMatch(/display=\{`\$\{Math\.round\(brushFlow \* 100\)\}%`\}/);
   });
 
   it('pairs the tip sliders and the ink sliders, not four in a row', () => {
@@ -348,6 +348,41 @@ describe('brush: strength is the ceiling, 透明度 is the rate', () => {
   it('sends flow from both painters', () => {
     expect(paintView).toMatch(/api\.stroke\([\s\S]*?p\.brushFlow\)/);
     expect(src).toMatch(/api\.stroke\([\s\S]*?brushFlow\)/);
+  });
+});
+
+describe('number keys: Photoshop opacity, on the brush or on the layer', () => {
+  /**
+   * PS decides between tool opacity and layer opacity by which tool is out.
+   * Here the same split: a tool that puts pixels down has an opacity of its
+   * own, so the numbers talk to it; with anything else the only thing left
+   * that has an opacity is the selected layer.
+   */
+  it('sends the digits to the brush for the brush and the eraser', () => {
+    const handler = src.slice(
+      src.indexOf("case 'opacity': {"),
+      src.indexOf("case 'brushAdjust':"),
+    );
+    expect(handler).toMatch(/BRUSH_OPACITY_TOOLS\.has\(toolRef\.current\)/);
+    expect(handler).toMatch(/setBrushFlow\(clamp\(v, 0\.01, 1\)\);/);
+    // ...and to the layer otherwise.
+    expect(handler).toMatch(/updateLayer\(al\.id, \{ opacity: v \}\);/);
+    // A ref, not the render's `tool`: this handler is installed once.
+    expect(handler).not.toMatch(/has\(tool\)/);
+    // ...and the pen is deliberately not one of them: a path is drawn once,
+    // so a brush opacity would have nothing to move.
+    expect(strip(rawShortcuts)).toMatch(
+      /BRUSH_OPACITY_TOOLS: ReadonlySet<Tool> = new Set<Tool>\(\['brush', 'eraser'\]\)/,
+    );
+  });
+
+  it('ignores key auto-repeat, or holding 4 flickers 40 -> 44', () => {
+    expect(src).toMatch(/case 'opacity': \{[\s\S]*?if \(e\.repeat\) break;/);
+  });
+
+  it('keeps the two-digit window in a pure function', () => {
+    // The clock is an argument, so `4` `5` = 45 is testable without waiting.
+    expect(src).toMatch(/applyOpacityDigit\(opacityDigit\.current, action\.digit, Date\.now\(\)\)/);
   });
 });
 

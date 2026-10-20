@@ -7,7 +7,10 @@ import {
   FX_META, addEffect, setEffectEnabled, setEffectAmount, removeEffect,
   type LayerEffect,
 } from './effects';
-import { resolveShortcut, shouldPrevent, SHORTCUT_HELP, type BrushParam, type Tool } from './shortcuts';
+import {
+  resolveShortcut, shouldPrevent, SHORTCUT_HELP, applyOpacityDigit,
+  BRUSH_OPACITY_TOOLS, type BrushParam, type Tool, type OpacityDigit,
+} from './shortcuts';
 import type { CursorUV } from './cursor';
 import PaintView, { PaintViewHandle, type PenInfo } from './components/PaintView';
 import Preview3D, { Preview3DHandle } from './components/Preview3D';
@@ -135,6 +138,16 @@ function beginPointerReorder(
  * you have to get past to reach 图层.
  */
 const START_COLLAPSED: Record<string, boolean> = { document: true, export: true };
+
+/**
+ * The screen-mode switch, with its key. The number row is gone from here — it
+ * is Photoshop's opacity shortcut now, and that muscle memory wins.
+ */
+const VIEW_BUTTONS: Array<[ViewMode, string, string]> = [
+  ['2d', '2D 绘制', 'F1'],
+  ['split', '分屏', 'F2'],
+  ['3d', '3D 预览', 'F3'],
+];
 
 const KIND_META: Record<LayerKind, { label: string; color: string }> = {
   paint: { label: '流向', color: '#10b981' },
@@ -632,6 +645,8 @@ export default function App() {
   // shortcuts
   const brushAdjust = useRef<{ param: BrushParam; x: number; moved: number; t: number } | null>(null);
   const mouseX = useRef(0);
+  /** First digit of a two-digit opacity (`4` `5` = 45%), waiting for the second. */
+  const opacityDigit = useRef<OpacityDigit | null>(null);
 
   useEffect(() => {
     // A clicked button keeps DOM focus, so Space/Enter would re-trigger it
@@ -683,6 +698,26 @@ export default function App() {
         case 'undo': structural(api.undo()); break;
         case 'redo': structural(api.redo()); break;
         case 'brushSize': setBrushSize((s) => clamp(s + action.delta, 1, 200)); break;
+        case 'opacity': {
+          // Photoshop's number keys: `4` is 40%, `4` `5` is 45%, `0` is 100%.
+          // What they set depends on the tool: the brush and the eraser
+          // have an opacity of their own, so the numbers talk to it; anything
+          // else and the only thing left with an opacity is the layer.
+          //
+          // Auto-repeat would type the same digit again ~30 ms later, so
+          // holding `4` would flicker 40% → 44% → 40% → 44%.
+          if (e.repeat) break;
+          const r = applyOpacityDigit(opacityDigit.current, action.digit, Date.now());
+          opacityDigit.current = r.pending;
+          const v = r.value / 100;
+          if (BRUSH_OPACITY_TOOLS.has(toolRef.current)) setBrushFlow(clamp(v, 0.01, 1));
+          else {
+            const st = stateRef.current;
+            const al = st?.layers.find((l) => l.id === st.active);
+            if (al) updateLayer(al.id, { opacity: v });
+          }
+          break;
+        }
         case 'brushAdjust':
           // Ignore key auto-repeat. Holding F fires keydown again every ~30 ms;
           // re-arming the scrub each time would zero `moved` and refresh the
@@ -1306,8 +1341,8 @@ export default function App() {
                   display={`${Math.round(brushStrength * 100)}%`}
                   title="想画到的流动强度上限（类似 Photoshop 的前景色）。反复涂抹只会趋近这个值，不会越涂越强。" />
                 <Slider label="透明度" value={brushFlow} min={0.01} max={1} step={0.01} onChange={setBrushFlow}
-                  display={`${Math.round((1 - brushFlow) * 100)}%`}
-                  title="一笔能落下多少。0% 一笔到位、完全不透明；越往左越透明，同一处要涂好几笔才接近强度（类似 Photoshop 的流量）。" />
+                  display={`${Math.round(brushFlow * 100)}%`}
+                  title="一笔落下多少。100% 一笔到位；越低越透，同一处要涂好几笔才接近强度（类似 Photoshop 的流量）。数字键 1–0 直接设这个值。" />
               </div>
               {/* The gesture is undiscoverable: it is a modifier plus the button
                   you never press. Photoshop has the same problem and solves it
@@ -1383,9 +1418,10 @@ export default function App() {
           {/* Far right end of the options bar is where PS puts the screen-mode
               switch. It used to sit in the HTML title bar, which is gone. */}
           <div className="menu-group segmented">
-            {(['2d', 'split', '3d'] as ViewMode[]).map((m) => (
-              <button key={m} className={viewMode === m ? 'on' : ''} onClick={() => setViewMode(m)}>
-                {m === '2d' ? '2D 绘制' : m === 'split' ? '分屏' : '3D 预览'}
+            {VIEW_BUTTONS.map(([m, label, k]) => (
+              <button key={m} className={viewMode === m ? 'on' : ''} onClick={() => setViewMode(m)}
+                title={`${label}（${k}）`}>
+                {label}
               </button>
             ))}
           </div>

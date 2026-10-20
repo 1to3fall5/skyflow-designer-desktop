@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { resolveShortcut, isTextEntry, shouldPrevent, NON_PAINTING_TOOLS, KeyEventLike } from './shortcuts';
+import {
+  resolveShortcut, isTextEntry, shouldPrevent, applyOpacityDigit, OPACITY_TYPING_MS,
+  NON_PAINTING_TOOLS, KeyEventLike,
+} from './shortcuts';
 
 const key = (k: string, extra: Partial<KeyEventLike> = {}): KeyEventLike => ({ key: k, ...extra });
 
@@ -50,10 +53,55 @@ describe('tool shortcuts', () => {
 });
 
 describe('view shortcuts', () => {
-  it('maps 1/2/3', () => {
-    expect(resolveShortcut(key('1'))).toEqual({ type: 'view', mode: '2d' });
-    expect(resolveShortcut(key('2'))).toEqual({ type: 'view', mode: 'split' });
-    expect(resolveShortcut(key('3'))).toEqual({ type: 'view', mode: '3d' });
+  /**
+   * F1/F2/F3, not 1/2/3. The number row is Photoshop's opacity shortcut, and
+   * that muscle memory is older and stronger than any screen-mode key — it is
+   * the one thing people type without looking at the keyboard.
+   */
+  it('maps F1/F2/F3', () => {
+    expect(resolveShortcut(key('F1'))).toEqual({ type: 'view', mode: '2d' });
+    expect(resolveShortcut(key('F2'))).toEqual({ type: 'view', mode: 'split' });
+    expect(resolveShortcut(key('F3'))).toEqual({ type: 'view', mode: '3d' });
+  });
+
+  it('swallows them, or the WebView opens its own help / find', () => {
+    expect(shouldPrevent(key('F1'))).toBe(true);
+    expect(shouldPrevent(key('F2'))).toBe(true);
+    expect(shouldPrevent(key('F3'))).toBe(true);
+  });
+});
+
+describe('number keys are Photoshop\'s opacity shortcut', () => {
+  it('maps every digit, with 0 standing for 100', () => {
+    for (let d = 1; d <= 9; d++) {
+      expect(resolveShortcut(key(String(d)))).toEqual({ type: 'opacity', digit: d });
+    }
+    expect(resolveShortcut(key('0'))).toEqual({ type: 'opacity', digit: 0 });
+  });
+
+  it('reads one digit as tens', () => {
+    expect(applyOpacityDigit(null, 4, 0).value).toBe(40);
+    expect(applyOpacityDigit(null, 1, 0).value).toBe(10);
+    // A lone 0 is opaque, which is the one key that is not "digit × 10".
+    expect(applyOpacityDigit(null, 0, 0).value).toBe(100);
+  });
+
+  it('reads two digits inside the window as one number', () => {
+    const first = applyOpacityDigit(null, 4, 0);
+    expect(applyOpacityDigit(first.pending, 5, 10).value).toBe(45);
+    // `1` `0` is 10%, not 0% — 0% is the one number PS never produces.
+    const one = applyOpacityDigit(null, 1, 0);
+    expect(applyOpacityDigit(one.pending, 0, 10).value).toBe(10);
+    // ...and `0` `0` is 100%, not nothing at all.
+    const zero = applyOpacityDigit(null, 0, 0);
+    expect(applyOpacityDigit(zero.pending, 0, 10).value).toBe(100);
+  });
+
+  it('lets the second digit expire', () => {
+    const first = applyOpacityDigit(null, 4, 0);
+    // Long enough to feel like typing, short enough that a second number is
+    // still one gesture.
+    expect(applyOpacityDigit(first.pending, 5, OPACITY_TYPING_MS + 1).value).toBe(50);
   });
 });
 
@@ -158,7 +206,7 @@ describe('pen path keys', () => {
 
 describe('unhandled keys', () => {
   it('returns none for anything else', () => {
-    for (const k of ['q', 'w', 'x', '9', 'F1', 'ArrowUp']) {
+    for (const k of ['q', 'w', 'x', 'F4', 'F5', 'ArrowUp']) {
       expect(resolveShortcut(key(k))).toEqual({ type: 'none' });
     }
   });

@@ -17,6 +17,16 @@ export type BrushParam = 'size' | 'strength' | 'hardness';
 export const NON_PAINTING_TOOLS: ReadonlySet<Tool> =
   new Set<Tool>(['magic_wand', 'eyedropper', 'pan']);
 
+/**
+ * Tools whose number keys set the *brush* opacity instead of the layer's.
+ *
+ * Deliberately not "everything that paints": the pen draws a path exactly
+ * once, so there is no "how much lands per pass" for a number to set — and
+ * giving it one would make the keys look dead, because the pen's options bar
+ * has no 透明度 to move. Photoshop agrees and leaves the pen on layer opacity.
+ */
+export const BRUSH_OPACITY_TOOLS: ReadonlySet<Tool> = new Set<Tool>(['brush', 'eraser']);
+
 export type Action =
   | { type: 'none' }
   | { type: 'tool'; tool: Tool }
@@ -33,7 +43,10 @@ export type Action =
   | { type: 'file'; op: 'new' | 'open' | 'save' | 'saveAs' | 'export' }
   | { type: 'brushSize'; delta: number }
   /** F / Ctrl+F held: enter drag-to-adjust mode for a brush parameter. */
-  | { type: 'brushAdjust'; param: BrushParam };
+  | { type: 'brushAdjust'; param: BrushParam }
+  /** A number key, Photoshop's opacity shortcut. `0` arrives as 10. */
+  /** A number key, Photoshop's opacity shortcut. `0` arrives as 0 and means 100%. */
+  | { type: 'opacity'; digit: number };
 
 export const NONE: Action = { type: 'none' };
 
@@ -110,9 +123,20 @@ export function resolveShortcut(e: KeyEventLike): Action {
     case 'i': return { type: 'tool', tool: 'eyedropper' };
     case 'h': return { type: 'tool', tool: 'pan' };
 
-    case '1': return { type: 'view', mode: '2d' };
-    case '2': return { type: 'view', mode: 'split' };
-    case '3': return { type: 'view', mode: '3d' };
+    // View modes are on F1/F2/F3, not 1/2/3: the number row belongs to
+    // Photoshop's opacity shortcut, and muscle memory for that is older and
+    // stronger than muscle memory for a screen mode.
+    case 'F1': return { type: 'view', mode: '2d' };
+    case 'F2': return { type: 'view', mode: 'split' };
+    case 'F3': return { type: 'view', mode: '3d' };
+
+    // Photoshop's number keys: `4` is 40%, `4` then `5` is 45%, `0` is 100%.
+    // Which opacity they set is decided by the handler, from the tool — see
+    // `BRUSH_OPACITY_TOOLS`.
+    case '1': case '2': case '3': case '4': case '5':
+    case '6': case '7': case '8': case '9':
+      return { type: 'opacity', digit: Number(k) };
+    case '0': return { type: 'opacity', digit: 0 };
 
     case 'a': return { type: 'toggle', what: 'arrows' };
     case 'r': return { type: 'toggle', what: 'reference' };
@@ -139,10 +163,42 @@ export function resolveShortcut(e: KeyEventLike): Action {
 export function shouldPrevent(e: KeyEventLike): boolean {
   const mod = (e.ctrl ?? false) || (e.meta ?? false);
   if (mod) return true;
+  // F1 is the browser's "help" and F3 its "find next"; both would open
+  // something over the canvas.
+  if (e.key === 'F1' || e.key === 'F2' || e.key === 'F3') return true;
   // Tab must be swallowed or the WebView walks focus into the toolbar instead
   // of hiding the panels — and focus would then eat every later shortcut.
   // Backspace would otherwise be the browser's "back".
   return e.key === ' ' || e.key === '?' || e.key === '/' || e.key === 'Tab' || e.key === 'Backspace';
+}
+
+/** How long a second digit has to arrive to be read as part of the first. */
+export const OPACITY_TYPING_MS = 1000;
+
+/** A first digit waiting for its second one. */
+export interface OpacityDigit {
+  digit: number;
+  at: number;
+}
+
+/**
+ * Photoshop's number-key opacity: `4` is 40%, `4` then `5` is 45%, `0` is 100%.
+ *
+ * A lone `0` is 100% — the one key that is not "digit × 10". It still has to
+ * arrive as `0` so that it can be the 0 in `10`.
+ *
+ * Pure: the clock and the pending digit are both arguments, so the timing rule
+ * is testable without waiting a second.
+ */
+export function applyOpacityDigit(
+  prev: OpacityDigit | null, digit: number, now: number,
+): { value: number; pending: OpacityDigit | null } {
+  if (prev && now - prev.at <= OPACITY_TYPING_MS) {
+    const v = prev.digit * 10 + digit;
+    // `0` `0` adds up to nothing at all, which means "opaque", not "invisible".
+    return { value: v === 0 ? 100 : v, pending: null };
+  }
+  return { value: digit === 0 ? 100 : digit * 10, pending: { digit, at: now } };
 }
 
 /** Human-readable table shared by the in-app help panel and the docs. */
@@ -150,7 +206,9 @@ export const SHORTCUT_HELP: Array<[string, string]> = [
   ['画笔 / 钢笔 / 橡皮擦 / 魔棒', 'B / P / E / M'],
   ['吸管 / 平移视图', 'I / H'],
   ['隐藏 / 显示全部面板', 'Tab'],
-  ['2D 绘制 / 分屏 / 3D 预览', '1 / 2 / 3'],
+  ['2D 绘制 / 分屏 / 3D 预览', 'F1 / F2 / F3'],
+  ['笔刷透明度（画笔 / 橡皮擦时）', '1 – 0（如 4，或 4 5 = 45%，0 = 100%）'],
+  ['图层不透明度（含钢笔在内的其它工具）', '1 – 0'],
   ['显示流向箭头', 'A'],
   ['显示/隐藏天空贴图', 'R'],
   ['叠加 Flowmap', 'O'],
