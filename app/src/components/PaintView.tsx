@@ -9,6 +9,7 @@ import {
   type Anchor, type PathData, type PathBrush, type PathHit,
 } from '../pen';
 import { NON_PAINTING_TOOLS, type Tool } from '../shortcuts';
+import { createFlowWarp, type FlowWarp } from '../flowWarp';
 
 export interface PaintViewHandle {
   applySnapshot: (s: Snapshot) => void;
@@ -74,11 +75,17 @@ export interface PaintViewProps {
   /**
    * Flow animation, in the same units the 3D preview uses. 0 is paused.
    *
-   * The 2D view has no texture to push around, so what it animates is the
-   * thing that actually shows the flow: the arrows. Without this the 播放开关
-   * did nothing at all in 2D, while `animating` starts out true.
+   * Two different things move in 2D: the 贴图 is pushed around by the field
+   * (see `flowWarp.ts`, the same maths as the 3D shader), and the arrows get a
+   * marching dash. Without this the 播放开关 did nothing at all in 2D, while
+   * `animating` starts out true.
    */
   animSpeed: number;
+  /**
+   * How far the field carries 天空贴图, in UV. The 3D shader's
+   * `uDistortionStrength` — the same number, so the split agrees.
+   */
+  distortion: number;
   wrap: boolean;
   /** Shared cursor published to the 3D view (canvas coordinates). */
   cursorUV: React.MutableRefObject<CursorUV | null>;
@@ -290,6 +297,24 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
   /** One round trip in flight, so a slow frame cannot land out of order. */
   const editBusy = useRef(false);
 
+  /*
+   * 天空贴图, animated.
+   *
+   * The warp is a GPU job (see `flowWarp.ts`): the offset differs per pixel, so
+   * canvas 2D cannot express it. It runs only while the animation is playing —
+   * paused, the plain `<img>` is the correct picture and costs nothing.
+   */
+  const warpRef = useRef<HTMLCanvasElement | null>(null);
+  const warp = useRef<FlowWarp | null>(null);
+  /** Decoded sky image, ready to upload whenever the context comes up. */
+  const skyImg = useRef<HTMLImageElement | null>(null);
+  /** The composite moved, so the flow texture is stale. */
+  const flowDirty = useRef(true);
+  /** Animation phase in cycles — the 3D shader's `uTime * uSpeed`. */
+  const warpPhase = useRef(0);
+  /** Whether the warped copy is on screen, which decides which layer shows. */
+  const [warpLive, setWarpLive] = useState(false);
+
   const applyTransform = useCallback(() => {
     const el = wrapRef.current;
     if (!el) return;
@@ -369,6 +394,10 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     if (!ctx) return;
     const bytes = decodeBase64(s.data);
     ctx.putImageData(toImageData(bytes, s.w, s.h), s.x, s.y);
+    // The field changed, so the copy the warp is sampling from is stale. Flagging
+    // it here beats re-uploading 4 MB every frame: this is the only place the
+    // composite's pixels move on the hot path.
+    flowDirty.current = true;
   }, []);
 
   /**
@@ -1154,6 +1183,82 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     return () => cancelAnimationFrame(raf);
   }, [props.showArrows, props.animSpeed, props.arrowDensity, props.size, drawArrows]);
 
+  /**
+   * Decode 天空贴图 once, so pausing and resuming does not re-decode a 4K
+   * image every time. The upload happens whenever the context comes up.
+   */
+  useEffect(() => {
+    const src = props.referenceSrc;
+    if (!src) { skyImg.current = null; return; }
+    const img = new Image();
+    img.src = src;
+    skyImg.current = img;
+    const upload = () => {
+      if (!img.naturalWidth) return;
+      warp.current?.setSky(img, img.naturalWidth, img.naturalHeight);
+      flowDirty.current = true;
+    };
+    if (img.complete) upload();
+    else img.addEventListener('load', upload, { once: true });
+  }, [props.referenceSrc]);
+
+  /**
+   * 天空贴图, carried along by the field.
+   *
+   * In a split, the 3D half flowed while the 2D half sat still — and the 2D
+   * half is the one you are painting into, which is exactly where you want to
+   * watch the sky move. Canvas 2D cannot do this (the offset differs per
+   * pixel), so it goes through `flowWarp.ts`, which is the 3D shader's maths
+   * on a flat quad.
+   *
+   * Paused is not "phase 0" here either: the still image comes back, because
+   * the undistorted texture is what you read your flowmap against.
+   */
+  useEffect(() => {
+    const p = propsRef.current;
+    if (!p.showReference || !p.referenceSrc || p.animSpeed <= 0) {
+      setWarpLive(false);
+      return;
+    }
+    const cv = warpRef.current;
+    if (!cv) return;
+    if (!warp.current) {
+      warp.current = createFlowWarp(cv);
+      // No WebGL (headless, blacklisted driver): the plain <img> stays and
+      // nothing else about the view changes.
+      if (!warp.current) return;
+      const img = skyImg.current;
+      if (img && img.complete && img.naturalWidth) {
+        warp.current.setSky(img, img.naturalWidth, img.naturalHeight);
+      }
+    }
+    flowDirty.current = true;
+    setWarpLive(true);
+    let raf = 0;
+    let last = performance.now();
+    const tick = (now: number) => {
+      const dt = Math.min((now - last) / 1000, 0.1);
+      last = now;
+      // The 3D shader's `uTime * uSpeed`: same units, so the two halves of a
+      // split drift in step instead of slowly separating.
+      warpPhase.current += dt * p.animSpeed;
+      const w = warp.current;
+      const field = canvasRef.current;
+      if (w && field) {
+        if (flowDirty.current) { w.setFlow(field); flowDirty.current = false; }
+        w.draw(warpPhase.current, p.distortion);
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => { cancelAnimationFrame(raf); setWarpLive(false); };
+  }, [props.showReference, props.referenceSrc, props.animSpeed, props.size]);
+
+  useEffect(() => () => {
+    warp.current?.dispose();
+    warp.current = null;
+  }, []);
+
   return (
     <div className="paint-view" onWheel={onWheel}
       onPointerDownCapture={onViewDown}
@@ -1187,10 +1292,20 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
             src={props.referenceSrc}
             alt="reference"
             className="paint-reference"
-            style={{ opacity: props.referenceOpacity }}
+            style={{ opacity: warpLive ? 0 : props.referenceOpacity }}
             draggable={false}
           />
         )}
+        {/* Above the still image, below the pen overlay: once the field is
+            carrying the texture, the still image is the wrong picture — but
+            the path being drawn is still the thing you have to see. */}
+        <canvas
+          ref={warpRef}
+          width={props.size}
+          height={props.size}
+          className="paint-reference-warp"
+          style={{ opacity: warpLive ? props.referenceOpacity : 0 }}
+        />
         {/* Last, so it sits above the reference overlay: a sky texture across
             the path you are drawing is exactly the thing you cannot draw
             against. */}

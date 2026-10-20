@@ -18,6 +18,7 @@ import rawPen from './pen?raw';
 import rawApi from './api?raw';
 import rawShortcuts from './shortcuts?raw';
 import rawIcons from './icons?raw';
+import rawFlowWarp from './flowWarp?raw';
 // Vite's CSS plugin turns `styles.css?raw` into an empty string, so read
 // the source straight off disk. Everything else here uses `?raw`.
 import { readFileSync } from 'node:fs';
@@ -31,6 +32,7 @@ const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*
 const src = strip(rawSrc);
 const paintView = strip(rawPaintView);
 const preview3D = strip(rawPreview3D);
+const flowWarp = strip(rawFlowWarp);
 
 /** Commands whose result must be pushed into React state, not just pixels. */
 const STRUCTURAL = [
@@ -355,8 +357,8 @@ describe('2D flow animation: the arrows have to move', () => {
   /**
    * `animating` starts out true, and the 播放开关 used to move nothing at all
    * in the 2D view — the one place you most want to see which way the field
-   * runs. The 3D preview pushes a texture around; there is no texture in 2D,
-   * so what moves is the thing that *is* the flow: the arrows.
+   * runs. The arrows are only one of the two things that move; 天空贴图 is the
+   * other, and it has its own describe below.
    */
   it('drives the 2D arrows from the same speed the 3D preview uses', () => {
     expect(src).toMatch(/const animSpeed = animating \? speed : 0;/);
@@ -387,6 +389,52 @@ describe('2D flow animation: the arrows have to move', () => {
     expect(paintView).toMatch(
       /if \(!p\.showArrows \|\| p\.animSpeed <= 0\) \{[\s\S]*?animDash\.current = null;[\s\S]*?drawArrows\(null\);/,
     );
+  });
+});
+
+describe('2D flow animation: 天空贴图 has to move too', () => {
+  /**
+   * The arrows were the wrong answer to "2D 没有流动动画": what the 3D half of
+   * a split visibly does is push the *texture* around. Canvas 2D cannot warp
+   * per-pixel, so the 2D view needs the same shader maths on a flat quad.
+   */
+  it('gives the 2D warp the same speed and strength as the 3D shader', () => {
+    expect(src).toMatch(/distortion=\{distortion\}/);
+    expect(paintView).toMatch(/distortion: number;/);
+  });
+
+  it('runs the warp in cycles, the unit the 3D shader uses', () => {
+    // 3D is fract(uTime * uSpeed); this is the same integral, so the halves of
+    // a split cannot drift apart.
+    expect(paintView).toMatch(/warpPhase\.current \+= dt \* p\.animSpeed;/);
+  });
+
+  it('uploads the flowmap when the pixels change, not every frame', () => {
+    // 4 MB per frame at 60 Hz would be the most expensive thing in the app,
+    // and the composite only moves on a stroke.
+    const snap = paintView.slice(
+      paintView.indexOf('const applySnapshot = useCallback'),
+      paintView.indexOf('const refreshArrows = useCallback'),
+    );
+    expect(snap).toMatch(/flowDirty\.current = true;/);
+    expect(paintView).toMatch(/if \(flowDirty\.current\) \{ w\.setFlow\(field\); flowDirty\.current = false; \}/);
+  });
+
+  it('negates the vertical component: 2D v runs down, the 3D shader\'s runs up', () => {
+    /**
+     * Measured, not reasoned: the same sky and flowmap through flowWarp.ts and
+     * through SKY_FRAG on a flat plane land the same dot to 0.00 px, in all
+     * four directions. Drop the minus and the 2D texture drifts against its
+     * own arrows.
+     */
+    expect(flowWarp).toMatch(/vec2\(flow\.x, -flow\.y\)/);
+  });
+
+  it('falls back to the still image where there is no WebGL', () => {
+    // createFlowWarp returns null rather than throwing, and the plain <img>
+    // keeps its opacity — losing the context costs the animation, nothing else.
+    expect(paintView).toMatch(/if \(!warp\.current\) return;/);
+    expect(paintView).toMatch(/opacity: warpLive \? 0 : props\.referenceOpacity/);
   });
 });
 

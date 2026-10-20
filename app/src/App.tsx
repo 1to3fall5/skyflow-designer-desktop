@@ -826,7 +826,8 @@ export default function App() {
   /**
    * One number for both views, so 播放动画 means the same thing on either side
    * of the split. It has to be a single value: the 3D preview reads it from a
-   * shader uniform every frame, and the 2D view drives its arrows from it.
+   * shader uniform every frame, and the 2D view drives both the marching arrow
+   * dashes and the warped 天空贴图 from it.
    */
   const animSpeed = animating ? speed : 0;
 
@@ -1479,6 +1480,7 @@ export default function App() {
               showArrows={showArrows}
               arrowDensity={arrowDensity}
               animSpeed={animSpeed}
+              distortion={distortion}
               wrap={state.projection !== 'planar'}
               cursorUV={sharedCursor}
               adjusting={adjusting}

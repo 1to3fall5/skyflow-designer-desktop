@@ -828,6 +828,10 @@ input[type=checkbox] {
   position: absolute; inset: 0; width: 100%; height: 100%;
   object-fit: fill; pointer-events: none; user-select: none;
 }
+/* 天空贴图 after the field has carried it — see src/flowWarp.ts. Same box as
+   the still image it replaces; opacity is driven from PaintView so the two
+   swap without a flash. */
+.paint-reference-warp { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .cursor-none { cursor: none; }
 /* Alt held: the brush becomes an eyedropper. Shrink the ring to a small
    crosshair so it reads as "picking up a value", not "about to paint". */
