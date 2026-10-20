@@ -54,30 +54,48 @@ fn wrap1(v: i32, w: i32) -> usize {
     x as usize
 }
 
-fn box_pass(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize, horizontal: bool) {
+fn box_pass(
+    src: &[u8],
+    dst: &mut [u8],
+    w: usize,
+    h: usize,
+    r: usize,
+    horizontal: bool,
+    chs: usize,
+) {
     let win = (2 * r + 1) as i32;
     let half = win / 2;
     if horizontal {
-        dst.par_chunks_mut(w * 4)
-            .zip(src.par_chunks(w * 4))
-            .for_each(|(drow, srow)| {
+        // One rayon task per *strip of rows*, not per row. The window slides
+        // along x, so rows are the independent unit — but a task per row is
+        // ~500 dispatches of a couple of kB each, which is the same scheduler
+        // overhead the vertical pass used to pay (see below). At 512² (the
+        // obstacle plane) the horizontal passes were most of a plane rebuild.
+        // The inner loop is untouched, so the output is byte-identical.
+        let rows = ((h / 64).max(4)).min(64);
+        let block = rows * w * chs;
+        dst.par_chunks_mut(block)
+            .zip(src.par_chunks(block))
+            .for_each(|(dblk, sblk)| {
                 let wi = w as i32;
                 let ri = r as i32;
-                for c in 0..4usize {
-                    // initial window centred on x = 0
-                    let mut sum = 0i32;
-                    for k in -ri..=ri {
-                        sum += srow[wrap1(k, wi) * 4 + c] as i32;
-                    }
-                    for x in 0..w {
-                        // round, not truncate: six passes of truncation bias the
-                        // whole buffer downwards, and the unpremultiply at the
-                        // end of `blur` multiplies that bias back up.
-                        drow[x * 4 + c] = ((sum + half) / win) as u8;
-                        let xi = x as i32;
-                        let out = srow[wrap1(xi - ri, wi) * 4 + c] as i32;
-                        let inc = srow[wrap1(xi + ri + 1, wi) * 4 + c] as i32;
-                        sum += inc - out;
+                for (drow, srow) in dblk.chunks_mut(w * chs).zip(sblk.chunks(w * chs)) {
+                    for c in 0..chs {
+                        // initial window centred on x = 0
+                        let mut sum = 0i32;
+                        for k in -ri..=ri {
+                            sum += srow[wrap1(k, wi) * chs + c] as i32;
+                        }
+                        for x in 0..w {
+                            // round, not truncate: six passes of truncation bias
+                            // the whole buffer downwards, and the unpremultiply
+                            // at the end of `blur` multiplies that bias back up.
+                            drow[x * chs + c] = ((sum + half) / win) as u8;
+                            let xi = x as i32;
+                            let out = srow[wrap1(xi - ri, wi) * chs + c] as i32;
+                            let inc = srow[wrap1(xi + ri + 1, wi) * chs + c] as i32;
+                            sum += inc - out;
+                        }
                     }
                 }
             });
@@ -99,7 +117,7 @@ fn box_pass(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize, horizontal
         // blur, which is the whole reason dragging the 模糊 slider crawled.
         // A strip owns `cols × 4` bytes of accumulator, walks all of y once,
         // and costs one dispatch: 0.85 ms at 1024², byte-identical output.
-        let stride = w * 4;
+        let stride = w * chs;
         // ~64 strips whatever the canvas, each big enough to be worth a task
         // and small enough that its accumulator stays in L1.
         let strip = ((w / 64).max(8)).min(128);
@@ -108,8 +126,8 @@ fn box_pass(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize, horizontal
         (0..nstrips).into_par_iter().for_each(|s| {
             let x0 = s * strip;
             let x1 = (x0 + strip).min(w);
-            let off = x0 * 4;
-            let len = (x1 - x0) * 4;
+            let off = x0 * chs;
+            let len = (x1 - x0) * chs;
             let mut sum = vec![0i32; len];
             for k in -(r as i32)..=(r as i32) {
                 let sy = (k).clamp(0, h as i32 - 1) as usize;
@@ -208,8 +226,8 @@ pub fn blur(src: &Buf, radius: f32) -> Buf {
     // 4096² that was 3 × 67 MB of pure memcpy on top of the blur itself.
     let mut b = take_scratch(n * 4);
     for _ in 0..3 {
-        box_pass(&a, &mut b, w, h, br, true);
-        box_pass(&b, &mut a, w, h, br, false);
+        box_pass(&a, &mut b, w, h, br, true, 4);
+        box_pass(&b, &mut a, w, h, br, false, 4);
     }
     give_scratch(b);
 
@@ -700,36 +718,83 @@ pub fn apply_disturbance(
 }
 
 /// Build the half-resolution blurred alpha plane used by `apply_disturbance`.
+/// Downsample factor of the obstacle plane. The mask is blurred at half
+/// resolution: the plane is a soft field, and the full-resolution blur cost
+/// four times as much for a difference nobody can see.
+const OBS_DS: usize = 2;
+
+/// Blur radius of the plane, in *plane* pixels.
+fn obs_radius(dist_factor: f32) -> f32 {
+    (20.0 + dist_factor * 280.0) / OBS_DS as f32
+}
+
+/// How far a change to the mask reaches in the finished plane, in *canvas*
+/// pixels.
+///
+/// An edit moves the plane by the blur's own reach, and `apply_disturbance`
+/// then reads the plane one `sample_step` either side of each pixel. Both live
+/// in plane pixels, hence the scale back up. This is what lets a mask stroke
+/// dirty a rectangle instead of the whole canvas.
+pub fn obstacle_influence(dist_factor: f32) -> usize {
+    let r = obs_radius(dist_factor);
+    let step = (r * 0.2).floor().max(2.0) as usize;
+    (blur_influence(r) + step + 1) * OBS_DS
+}
+
 pub fn obstacle_alpha_plane(mask: &Buf, dist_factor: f32) -> (Vec<u8>, usize, usize, usize) {
-    let ds = 2usize;
+    let ds = OBS_DS;
     let lw = mask.w / ds;
     let lh = mask.h / ds;
 
-    // downsample alpha with wrap in x
-    let mut small = Buf::filled(lw, lh, [0, 0, 0, 0]);
-    small.data.par_chunks_mut(lw * 4).enumerate().for_each(|(y, row)| {
-        for x in 0..lw {
-            let mut acc = 0u32;
-            for dy in 0..ds {
-                for dx in 0..ds {
-                    let sx = wrap_i((x * ds + dx) as isize, mask.w);
-                    let sy = (y * ds + dy).min(mask.h - 1);
-                    acc += mask.data[(sy * mask.w + sx) * 4 + 3] as u32;
+    // Downsample alpha with wrap in x. One channel, because the plane is a
+    // single number per texel — going through `blur` blurred RGB as well and
+    // then threw it away, which is four times the work for nothing.
+    let mut small = vec![0u8; lw * lh];
+    // Same rule as the horizontal box pass: a strip of rows per task, not one
+    // row per task.
+    let per_task = ((lh / 64).max(4)).min(64);
+    let block = per_task * lw;
+    small.par_chunks_mut(block).enumerate().for_each(|(bi, blk)| {
+        for (ri, row) in blk.chunks_mut(lw).enumerate() {
+            let y = bi * per_task + ri;
+            for x in 0..lw {
+                let mut acc = 0u32;
+                for dy in 0..ds {
+                    for dx in 0..ds {
+                        let sx = wrap_i((x * ds + dx) as isize, mask.w);
+                        let sy = (y * ds + dy).min(mask.h - 1);
+                        acc += mask.data[(sy * mask.w + sx) * 4 + 3] as u32;
+                    }
                 }
+                row[x] = (acc / (ds * ds) as u32) as u8;
             }
-            row[x * 4 + 3] = (acc / (ds * ds) as u32) as u8;
         }
     });
 
-    let radius = (20.0 + dist_factor * 280.0) / ds as f32;
-    let blurred = blur(&small, radius);
-
-    let mut plane = vec![0u8; lw * lh];
-    plane.par_iter_mut().enumerate().for_each(|(i, p)| {
-        *p = blurred.data[i * 4 + 3];
-    });
+    let radius = obs_radius(dist_factor);
+    let plane = blur_plane(&small, lw, lh, radius);
     let sample_step = (radius * 0.2).floor().max(2.0) as usize;
     (plane, lw, lh, sample_step)
+}
+
+/// Three box passes over a single channel — `blur` without the other three.
+///
+/// The alpha channel of `blur()` is exactly this: the box passes are separable
+/// and per-channel, so blurring alpha alone gives byte-identical alpha. The
+/// plane only ever reads alpha.
+fn blur_plane(src: &[u8], w: usize, h: usize, radius: f32) -> Vec<u8> {
+    let r = radius.round() as usize;
+    if r == 0 {
+        return src.to_vec();
+    }
+    let br = ((r as f32) * 0.62).max(1.0).round() as usize;
+    let mut a = src.to_vec();
+    let mut b = vec![0u8; w * h];
+    for _ in 0..3 {
+        box_pass(&a, &mut b, w, h, br, true, 1);
+        box_pass(&b, &mut a, w, h, br, false, 1);
+    }
+    a
 }
 
 // ---------------------------------------------------------------------------

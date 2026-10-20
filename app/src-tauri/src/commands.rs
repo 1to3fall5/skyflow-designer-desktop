@@ -30,8 +30,6 @@ pub struct LayerInfo {
     pub effects: Vec<LayerEffect>,
     pub direction: f32,
     pub strength: f32,
-    pub disturbance_enabled: bool,
-    pub disturbance: f32,
     pub has_mask: bool,
     /// The layer's pen paths. The frontend renders and edits these, so they
     /// have to travel with every snapshot — undo and redo move them too.
@@ -111,8 +109,6 @@ pub struct LayerPatch {
     pub opacity: Option<f32>,
     pub direction: Option<f32>,
     pub strength: Option<f32>,
-    pub disturbance_enabled: Option<bool>,
-    pub disturbance: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -145,8 +141,6 @@ fn layer_info(l: &crate::engine::LayerData) -> LayerInfo {
         effects: l.p.effects.clone(),
         direction: l.p.direction,
         strength: l.p.strength,
-        disturbance_enabled: l.p.disturbance_enabled,
-        disturbance: l.p.disturbance,
         has_mask: l.p.has_mask,
         paths: l.paths.clone(),
     }
@@ -371,14 +365,13 @@ pub fn update_layer(patch: LayerPatch, state: State<AppState>) -> Snapshot {
             if let Some(v) = patch.opacity { l.p.opacity = v; }
             if let Some(v) = patch.direction { l.p.direction = v; l.wind_dirty = true; }
             if let Some(v) = patch.strength { l.p.strength = v; l.wind_dirty = true; }
-            if let Some(v) = patch.disturbance_enabled { l.p.disturbance_enabled = v; }
-            if let Some(v) = patch.disturbance { l.p.disturbance = v; }
         }
         // Every field here but `name` moves pixels everywhere: opacity and
-        // visibility re-scale the whole stack, direction and disturbance
-        // re-derive a whole-canvas field. Region-scoped compositing has to be
-        // told so. (Effects are not in this patch — they go through
-        // `set_effects`, which is whole-canvas by definition.)
+        // visibility re-scale the whole stack, direction re-derives a
+        // whole-canvas field. Region-scoped compositing has to be told so.
+        // (Effects are not in this patch — they go through `set_effects`,
+        // which is whole-canvas by definition; the disturbance is one of them
+        // now, rather than a field of its own.)
         if !renames_only {
             e.full_dirty = true;
         }

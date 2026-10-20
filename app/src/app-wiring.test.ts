@@ -1401,11 +1401,10 @@ describe('a control that does not apply is dimmed, not removed', () => {
     expect(rawStyles).toMatch(/\.row\.off \.row-value \{[^}]*color: var\(--txt-faint\);/);
   });
 
-  it('applies the same rule to the two other conditional rows', () => {
-    // 障碍层's 范围 appeared only once 绕开障碍物流动 was ticked, and 文档的
-    // 张角 only for 极坐标. Both pushed everything below them down.
-    expect(src).toMatch(/<Row label="范围" off=\{!activeLayer\.disturbance_enabled\}/);
-    expect(src).not.toMatch(/activeLayer\.disturbance_enabled && \(\s*\n\s*<Row label="范围"/);
+  it('applies the same rule to the other conditional row', () => {
+    // 文档的 张角 only exists for 极坐标. It used to appear and disappear,
+    // which pushed everything below it down under the pointer. (障碍层's 范围
+    // was the other one; it is an effect now, so it never appears at all.)
     expect(src).toMatch(/<Row label="张角" off=\{state\.projection !== 'polar'\}/);
     expect(src).not.toMatch(/state\.projection === 'polar' && \(\s*\n\s*<Row label="张角"/);
   });
@@ -1433,6 +1432,7 @@ describe('layer effects: something you hang on a layer', () => {
    */
   const i = src.indexOf('    layers: (');
   const layersPanel = src.slice(i, src.indexOf('\n    view:', i));
+  const propsPanel = src.slice(src.indexOf('    props:'), i);
 
   it('puts 不透明度 in the 图层 panel, above the list', () => {
     // Above the rows, the way PS has it: a single control that always means
@@ -1448,15 +1448,25 @@ describe('layer effects: something you hang on a layer', () => {
     // PS's "add a layer style" is a button in the panel footer; a hidden
     // slider would only ever appear once you already knew it was there.
     expect(layersPanel).toMatch(/<IconBtn icon="fx"/);
-    expect(layersPanel).toMatch(/changeEffects\(addEffect\(activeLayer\.effects, 'blur'\), true\)/);
+    expect(layersPanel).toMatch(/changeEffects\(addEffect\(activeLayer\.effects, nextFx\), true\)/);
   });
 
-  it('refuses the one kind that has no pixels to blur', () => {
-    // An obstacle layer contributes a mask, so there is nothing for a blur to
-    // act on; offering it would produce a control that does nothing.
-    expect(src).toMatch(/const NO_FX: ReadonlySet<LayerKind> = new Set<LayerKind>\(\['obstacle'\]\);/);
-    expect(src).toMatch(/const canFx = activeLayer \? !NO_FX\.has\(activeLayer\.kind\) : false;/);
+  it('offers the effect that kind can carry, and nothing else', () => {
+    // Blur acts on pixels; the disturbance acts on a mask, which only an
+    // obstacle layer has. A generic "add blur" would give the obstacle layer a
+    // dial that does nothing.
+    expect(src).toMatch(/ADDABLE_BY_KIND\[activeLayer\.kind\]/);
+    expect(src).toMatch(/const nextFx: EffectKind \| null = fxAddable\[0\] \?\? null;/);
     expect(layersPanel).toMatch(/disabled=\{!canFx\}/);
+  });
+
+  it('says what a 障碍层 is, rather than offering a switch for it', () => {
+    // The disturbance used to be a pair of fields on the layer, switched on by
+    // default — which is why every obstacle layer cost a plane rebuild per
+    // dab whether you wanted the bend or not. It is an effect now, so the
+    // parameters panel has nothing left to say but what the layer is.
+    expect(propsPanel).toMatch(/activeLayer\.kind === 'obstacle'[\s\S]{0,400}障碍层是一张遮罩/);
+    expect(src).not.toMatch(/disturbance_enabled/);
   });
 
   it('badges every layer that has effects, not just the active one', () => {
@@ -1516,7 +1526,7 @@ describe('layer effects: something you hang on a layer', () => {
     // each costing a zstd of the whole layer. This is what 不透明度 and 方向
     // already do — `updateLayer` never writes history.
     expect(src).toMatch(/if \(next\.history\) api\.saveHistory\(\);/);
-    expect(layersPanel).toMatch(/changeEffects\(addEffect\(activeLayer\.effects, 'blur'\), true\)/);
+    expect(layersPanel).toMatch(/changeEffects\(addEffect\(activeLayer\.effects, nextFx\), true\)/);
     expect(layersPanel).toMatch(/changeEffects\(removeEffect\(activeLayer\.effects, ei\), true\)/);
     expect(layersPanel).toMatch(/changeEffects\(setEffectEnabled\(activeLayer\.effects, ei, !e\.enabled\), true\)/);
     // ...and the amount drag specifically asks for none.

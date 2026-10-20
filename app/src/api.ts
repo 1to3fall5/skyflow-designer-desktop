@@ -15,8 +15,6 @@ export interface LayerInfo {
   effects: LayerEffect[];
   direction: number;
   strength: number;
-  disturbance_enabled: boolean;
-  disturbance: number;
   has_mask: boolean;
   /** Pen paths. Only ever non-empty on a `path` layer; empty elsewhere. */
   paths: PathData[];
@@ -62,8 +60,6 @@ export interface LayerPatch {
   opacity?: number;
   direction?: number;
   strength?: number;
-  disturbance_enabled?: boolean;
-  disturbance?: number;
 }
 
 const EMPTY_STATE: AppState = {

@@ -3,7 +3,7 @@
 
 use skyflow_lib::engine::buf::Buf;
 use skyflow_lib::engine::io;
-use skyflow_lib::engine::effect::LayerEffect;
+use skyflow_lib::engine::effect::{EffectKind, LayerEffect};
 use skyflow_lib::engine::ops::{self, Projection};
 use skyflow_lib::engine::{Engine, LayerKind};
 
@@ -1952,6 +1952,174 @@ fn a_project_from_before_effects_opens_with_its_blur_as_an_effect() {
     assert_eq!(fx.len(), 1, "the old radius must come back as an effect");
     assert!((fx[0].amount - 9.0).abs() < 1e-6, "and with the number it had");
     assert!(fx[0].enabled);
+}
+
+#[test]
+fn a_project_from_before_the_bend_became_an_effect_keeps_bending() {
+    // v2 carried `disturbance_enabled` / `disturbance` on every layer. An
+    // obstacle that had it switched on must come back with the effect that
+    // replaced it, or the file opens with the flow running straight into
+    // obstacles it used to part around — and nothing on screen says why.
+    //
+    // Same trick as the v1 test: a tuple in the old field order *is* an old
+    // file. (The layer order here is v2's: effects, legacy_blur, ...)
+    let n = 64usize;
+    let pixels = vec![0u8; n * n * 4];
+    let buf = zstd::stream::encode_all(&pixels[..], 3).unwrap();
+    let p = (
+        "obstacle-1".to_string(),
+        "障碍物".to_string(),
+        LayerKind::Obstacle,
+        true,
+        1.0f32,
+        Vec::<LayerEffect>::new(),
+        0.0f32, // visible, opacity, effects, legacy_blur
+        45.0f32,
+        0.5f32, // direction, strength
+        true,
+        0.5f32,
+        true, // disturbance_enabled, disturbance, has_mask
+    );
+    let proj = (
+        2u32,
+        n,
+        0u8,
+        90.0f32,
+        "obstacle-1".to_string(),
+        vec![(p, buf, None::<Vec<u8>>, Vec::<skyflow_lib::engine::path::PathData>::new())],
+        None::<Vec<u8>>,
+    );
+    let body = rmp_serde::to_vec(&proj).unwrap();
+    let packed = zstd::stream::encode_all(&body[..], 3).unwrap();
+    let mut raw = b"SKYFLW".to_vec();
+    raw.extend_from_slice(&2u32.to_le_bytes());
+    raw.extend_from_slice(&packed);
+
+    let path = write_tmp("legacy2.skyflow", &raw);
+    let loaded = io::load_project(path.to_str().unwrap())
+        .expect("a v2 project must still open");
+    let fx = &loaded.layer("obstacle-1").unwrap().p.effects;
+    assert_eq!(fx.len(), 1, "the old disturbance must come back as an effect");
+    assert_eq!(fx[0].kind, EffectKind::Disturbance);
+    assert!((fx[0].amount - 0.5).abs() < 1e-6, "and with the reach it had");
+    assert!(fx[0].enabled);
+}
+
+#[test]
+fn a_disturbance_field_on_a_layer_that_never_read_it_is_dropped() {
+    // Every layer carried the two fields, but only an obstacle ever looked at
+    // them. Migrating a paint layer's copy would add an effect that does
+    // nothing and cannot be told apart from one that does.
+    let n = 64usize;
+    let buf = zstd::stream::encode_all(&vec![0u8; n * n * 4][..], 3).unwrap();
+    let p = (
+        "paint-1".to_string(),
+        "流向 1".to_string(),
+        LayerKind::Paint,
+        true,
+        1.0f32,
+        Vec::<LayerEffect>::new(),
+        0.0f32,
+        45.0f32,
+        0.5f32,
+        true,
+        0.5f32,
+        false,
+    );
+    let proj = (
+        2u32,
+        n,
+        0u8,
+        90.0f32,
+        "paint-1".to_string(),
+        vec![(p, buf, None::<Vec<u8>>, Vec::<skyflow_lib::engine::path::PathData>::new())],
+        None::<Vec<u8>>,
+    );
+    let body = rmp_serde::to_vec(&proj).unwrap();
+    let packed = zstd::stream::encode_all(&body[..], 3).unwrap();
+    let mut raw = b"SKYFLW".to_vec();
+    raw.extend_from_slice(&2u32.to_le_bytes());
+    raw.extend_from_slice(&packed);
+
+    let path = write_tmp("legacy2-paint.skyflow", &raw);
+    let loaded = io::load_project(path.to_str().unwrap()).expect("open");
+    assert!(loaded.layer("paint-1").unwrap().p.effects.is_empty(),
+        "a paint layer never had a mask to bend around");
+}
+
+// ---------------------------------------------------------------------------
+// Obstacle: a cut-out first, a bend only if you ask
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_new_obstacle_layer_is_only_a_mask() {
+    // It used to arrive with the disturbance switched on at 0.5, which meant
+    // every dab on it rebuilt a downsampled blur of the whole mask — 4 ms at
+    // 1024², sixty times a second, whether or not you wanted the bend.
+    let mut e = Engine::new(64);
+    let id = e.add_layer(LayerKind::Obstacle);
+    e.active = id.clone();
+    e.stroke(&[(0.4, 0.5), (0.6, 0.5)], 30.0, 0.8, 1.0, false, "mask", 1, 1.0);
+    e.composite();
+    assert!(e.layer(&id).unwrap().plane_cache.is_none(),
+        "a plain obstacle must not build a disturbance plane");
+    // ...and it still does the one thing it is for.
+    let n = e.size;
+    let i = ((n / 2) * n + (n / 2)) * 4;
+    assert!(e.composite.data[i + 2] < 255,
+        "the mask must flag its pixels as not flowing");
+}
+
+#[test]
+fn the_bend_is_an_effect_you_have_to_ask_for() {
+    let mut e = Engine::new(256);
+    let id = e.add_layer(LayerKind::Obstacle);
+    e.active = id.clone();
+    e.stroke(&[(0.4, 0.5), (0.6, 0.5)], 40.0, 0.8, 1.0, false, "mask", 1, 1.0);
+    e.composite();
+    let straight = e.composite.data.clone();
+
+    e.set_effects(&id, vec![LayerEffect::disturbance(0.5)]);
+    e.composite();
+    assert!(e.layer(&id).unwrap().plane_cache.is_some(),
+        "adding the effect must build the plane");
+    assert_ne!(e.composite.data, straight, "and it must actually bend the field");
+
+    // Switched off keeps the number but stops paying for it.
+    e.set_effects(&id, vec![LayerEffect { enabled: false, ..LayerEffect::disturbance(0.5) }]);
+    e.composite();
+    assert!(e.layer(&id).unwrap().plane_cache.is_none(),
+        "a switched-off effect must stop building the plane");
+    assert_eq!(e.composite.data, straight, "and leave the field alone again");
+}
+
+#[test]
+fn a_mask_dab_on_a_plain_obstacle_stays_local() {
+    // The bend reaches hundreds of pixels, so a mask dab *with* the effect has
+    // to dirty that much. Without it there is no plane at all, and the dab is
+    // worth exactly its own footprint — the same as any other layer.
+    let n = 512;
+    let mut e = Engine::new(n);
+    let id = e.add_layer(LayerKind::Obstacle);
+    e.active = id.clone();
+    e.composite();
+    e.clear_dirty();
+
+    e.stroke(&[(0.5, 0.5), (0.53, 0.5)], 40.0, 0.8, 1.0, false, "mask", 1, 1.0);
+    e.composite();
+    let (_x, _y, w, h) = e.dirty_rect();
+    assert!(w > 0 && h > 0, "the dab must report a change");
+    assert!(w * h < n * n / 4,
+        "a dab on a plain obstacle dirtied {w}x{h} of a {n}px canvas");
+
+    // With the effect on, the reach is real and much wider — which is exactly
+    // why it is not on by default.
+    e.set_effects(&id, vec![LayerEffect::disturbance(0.5)]);
+    e.clear_dirty();
+    e.stroke(&[(0.5, 0.5), (0.53, 0.5)], 40.0, 0.8, 1.0, false, "mask", 2, 1.0);
+    e.composite();
+    let (_x2, _y2, w2, h2) = e.dirty_rect();
+    assert!(w2 > w, "the bend must reach further than the brush: {w2} vs {w}");
 }
 
 #[test]

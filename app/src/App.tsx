@@ -4,8 +4,8 @@ import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { api, nextStrokeId, AppState, LayerInfo, LayerKind, Snapshot } from './api';
 import type { PathData, PathBrush } from './pen';
 import {
-  FX_META, addEffect, setEffectEnabled, setEffectAmount, removeEffect,
-  type LayerEffect,
+  ADDABLE_BY_KIND, FX_META, addEffect, setEffectEnabled, setEffectAmount, removeEffect,
+  formatAmount, type EffectKind, type LayerEffect,
 } from './effects';
 import {
   resolveShortcut, shouldPrevent, SHORTCUT_HELP, applyOpacityDigit,
@@ -172,16 +172,6 @@ const PARAM_SECT: Record<LayerKind, string> = {
 
 /** Kinds whose pixels come from parameters, so painting one edits its mask. */
 const GENERATED: ReadonlySet<LayerKind> = new Set<LayerKind>(['wind', 'obstacle']);
-
-/**
- * Kinds that cannot take an effect.
- *
- * An obstacle layer contributes a mask and a disturbance plane, not a pixel
- * buffer, so there is nothing for a blur to act on — and it already has its
- * own softening dial (范围). Offering an effect here would be a control that
- * moves and does nothing, which is worse than a disabled button.
- */
-const NO_FX: ReadonlySet<LayerKind> = new Set<LayerKind>(['obstacle']);
 
 const RESOLUTIONS = [512, 1024, 2048, 4096];
 
@@ -822,7 +812,18 @@ export default function App() {
   // remember the geometry instead of the pixels. Only the generated kinds
   // (wind / obstacle) have no content of their own to paint into.
   const isAdj = activeLayer ? GENERATED.has(activeLayer.kind) : false;
-  const canFx = activeLayer ? !NO_FX.has(activeLayer.kind) : false;
+  /**
+   * What the `fx` button would add to the selected layer. A paint layer has
+   * pixels to soften; an obstacle layer has a mask for the flow to bend
+   * around. Offering either on the wrong kind would be a dial that moves and
+   * does nothing, so there is nothing to add and the button says so.
+   */
+  const fxAddable: EffectKind[] = activeLayer
+    ? ADDABLE_BY_KIND[activeLayer.kind].filter(
+        (k) => !activeLayer.effects.some((e) => e.kind === k))
+    : [];
+  const nextFx: EffectKind | null = fxAddable[0] ?? null;
+  const canFx = nextFx !== null;
   /**
    * One number for both views, so 播放动画 means the same thing on either side
    * of the split. It has to be a single value: the 3D preview reads it from a
@@ -1001,21 +1002,11 @@ export default function App() {
             </>
           )}
           {activeLayer.kind === 'obstacle' && (
-            <>
-              <Toggle label="绕开障碍物流动"
-                on={activeLayer.disturbance_enabled}
-                onChange={(v) => updateLayer(activeLayer.id, { disturbance_enabled: v })}>
-                {/* Dimmed, not removed: ticking the switch used to grow the
-                    panel by a row and by that much push 边缘 and 混合 down
-                    under the pointer. */}
-                <Row label="范围" off={!activeLayer.disturbance_enabled}
-                  value={`${Math.round(activeLayer.disturbance * 100)}%`}>
-                  <Range min={0} max={1} step={0.05} value={activeLayer.disturbance}
-                    onChange={(v) => updateLayer(activeLayer.id, { disturbance: v })}
-                    disabled={!activeLayer.disturbance_enabled} />
-                </Row>
-              </Toggle>
-            </>
+            <p className="note">
+              障碍层是一张遮罩：画到的地方不参与流动，就像被挖掉一样，仅此而已。
+              想让流绕着它走，用下面图层条的 <b>fx</b> 按钮给它挂一个「绕流」效果
+              ——那是另外一件事，而且是唯一需要为此多算一遍的东西，所以默认不挂。
+            </p>
           )}
         </Section>
         {/* 不透明度 and 模糊 are deliberately *not* here. The first is in the
@@ -1045,10 +1036,16 @@ export default function App() {
           {/* PS's "add a layer style" button lives in this strip, and so does
               this one: an effect is not a property of the layer, it is
               something you hang on it, so it gets an action rather than a
-              slider. */}
-          <IconBtn icon="fx" title={canFx ? '添加图层效果：模糊' : '障碍层由遮罩决定边缘，它没有可加的效果'}
+              slider. What it adds depends on the kind — see
+              `ADDABLE_BY_KIND`. */}
+          <IconBtn icon="fx"
+            title={nextFx
+              ? `添加图层效果：${FX_META[nextFx].label}`
+              : canFx ? '这一层已经挂了它能挂的效果'
+              : '这一层没有可加的效果'}
             disabled={!canFx}
-            onClick={() => activeLayer && changeEffects(addEffect(activeLayer.effects, 'blur'), true)} />
+            onClick={() =>
+              activeLayer && nextFx && changeEffects(addEffect(activeLayer.effects, nextFx), true)} />
           <span className="bar-sep" />
           {/* Keyboard- and pointer-reachable reordering. Drag and drop works
               too, but it is undiscoverable on its own. */}
@@ -1168,7 +1165,10 @@ export default function App() {
                       setFxScrub({ i: ei, v });
                       changeEffects(setEffectAmount(activeLayer.effects, ei, v));
                     }} />
-                  <span className="fx-val">{amount | 0}</span>
+                  {/* A radius reads in pixels, a reach in per cent — the slider
+                      is 0..1 for the latter and `amount | 0` would print 0 for
+                      every position but the last. */}
+                  <span className="fx-val">{formatAmount(e.kind, amount)}</span>
                   <button className="fx-del" title={`删除${m.label}`}
                     aria-label={`删除${m.label}`}
                     onClick={() => changeEffects(removeEffect(activeLayer.effects, ei), true)}>

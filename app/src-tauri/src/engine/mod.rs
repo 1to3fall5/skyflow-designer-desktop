@@ -8,9 +8,10 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use buf::{wrap_i, Buf};
-use effect::{blur_amount, LayerEffect};
+use effect::{blur_amount, disturbance_amount, LayerEffect};
 use ops::{apply_disturbance, blur, blur_influence, flood_fill, generate_wind,
-          obstacle_alpha_plane, stamp, StampStyle, Projection, PAR_MIN_ROWS};
+          obstacle_alpha_plane, obstacle_influence, stamp, StampStyle, Projection,
+          PAR_MIN_ROWS};
 use path::{generate_paths, PathData};
 
 pub type Proj = Projection;
@@ -47,9 +48,6 @@ pub struct LayerParams {
     // wind
     pub direction: f32,
     pub strength: f32,
-    // obstacle
-    pub disturbance_enabled: bool,
-    pub disturbance: f32,
     pub has_mask: bool,
 }
 
@@ -135,8 +133,6 @@ impl Engine {
                 legacy_blur: 0.0,
                 direction: 0.0,
                 strength: 0.0,
-                disturbance_enabled: false,
-                disturbance: 0.0,
                 has_mask: false,
             },
             buf: Buf::new(size, size),
@@ -159,8 +155,6 @@ impl Engine {
                 legacy_blur: 0.0,
                 direction: 45.0,
                 strength: 0.5,
-                disturbance_enabled: false,
-                disturbance: 0.0,
                 has_mask: false,
             },
             buf: Buf::new(size, size),
@@ -311,8 +305,6 @@ impl Engine {
             legacy_blur: 0.0,
             direction: 45.0,
             strength: 0.5,
-            disturbance_enabled: true,
-            disturbance: 0.5,
             has_mask: false,
         };
         self.layers.push(LayerData {
@@ -516,8 +508,19 @@ impl Engine {
         if is_adj {
             // The dab is small but the obstacle plane it feeds is blurred by
             // hundreds of pixels, so the disturbance moves far outside the
-            // brush. A mask edit is one click's worth of work either way.
-            self.full_dirty = true;
+            // brush. Not to the far side of the canvas though: grow the rect by
+            // that reach rather than calling everything dirty. `full_dirty`
+            // here cost a full recomposite *and* a full-canvas round trip on
+            // every dab of an obstacle stroke — 7.2 ms and 4 MB at 1024², sixty
+            // times a second.
+            let reach = self
+                .layers
+                .iter()
+                .filter(|l| l.p.id == active_id)
+                .map(Self::obstacle_reach)
+                .max()
+                .unwrap_or(0);
+            self.pending = merge_rect(self.pending, Self::grow_rect(rect, reach, self.size));
         } else {
             self.pending = merge_rect(self.pending, rect);
         }
@@ -794,6 +797,37 @@ impl Engine {
         }
     }
 
+    /// How far an edit to this layer's mask reaches, in canvas pixels. 0 for
+    /// anything that is not an obstacle carrying a disturbance effect: those
+    /// contribute pointwise, so a dab only ever moves its own footprint.
+    fn obstacle_reach(l: &LayerData) -> usize {
+        if l.p.kind != LayerKind::Obstacle {
+            return 0;
+        }
+        let d = disturbance_amount(&l.p.effects);
+        if d <= 0.0 {
+            return 0;
+        }
+        obstacle_influence(d)
+    }
+
+    /// `r` grown by `pad`, clipped to the canvas.
+    fn grow_rect(
+        r: (usize, usize, usize, usize),
+        pad: usize,
+        n: usize,
+    ) -> (usize, usize, usize, usize) {
+        let (x, y, w, h) = r;
+        if w == 0 || h == 0 {
+            return r;
+        }
+        let x0 = x.saturating_sub(pad);
+        let y0 = y.saturating_sub(pad);
+        let x1 = (x + w + pad).min(n);
+        let y1 = (y + h + pad).min(n);
+        (x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
+    }
+
     // -- compositing ---------------------------------------------------------
 
     /// Rebuild the composite — only the rectangle that can actually have
@@ -854,11 +888,16 @@ impl Engine {
                 global = true;
             }
             if l.p.kind == LayerKind::Obstacle {
-                let want = l.mask.is_some() && l.p.disturbance_enabled && l.p.disturbance > 0.0;
+                // The mask alone is a cut-out: it writes the B channel and
+                // nothing else, which costs one pass. The *disturbance* is the
+                // expensive part — a downsampled blur of the whole mask — and
+                // it is now an effect you have to ask for, so an obstacle that
+                // is just a mask never builds a plane at all.
+                let dist = disturbance_amount(&l.p.effects);
+                let want = l.mask.is_some() && dist > 0.0;
                 if !want {
                     l.plane_cache = None;
                 } else {
-                    let dist = l.p.disturbance;
                     let stale = l.plane_cache.as_ref().map(|c| c.0 != dist).unwrap_or(true);
                     if l.mask_dirty || stale {
                         let (plane, lw, lh, ss) = {
@@ -867,7 +906,13 @@ impl Engine {
                         };
                         l.plane_cache = Some((dist, plane, lw, lh, ss));
                         l.mask_dirty = false;
-                        global = true;
+                        // A mask edit moves the plane within `obstacle_reach`
+                        // of the brush and no further, and `pending` already
+                        // covers that. Only a new *disturbance* rewrites the
+                        // whole field.
+                        if stale {
+                            global = true;
+                        }
                     }
                 }
             }

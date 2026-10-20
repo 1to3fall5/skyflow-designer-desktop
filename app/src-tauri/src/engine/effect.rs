@@ -19,6 +19,15 @@ use serde::{Deserialize, Serialize};
 pub enum EffectKind {
     /// Softens the layer's own pixels before they are composited.
     Blur,
+    /// Bends the flow *underneath* around the layer's mask, so the field
+    /// parts around an obstacle instead of running into it.
+    ///
+    /// Only an obstacle layer has a mask to bend around, so this is the one
+    /// effect that kind can carry. It used to be a pair of fields on the
+    /// layer — which meant every obstacle paid for it whether or not you
+    /// wanted it. (It is also the most expensive thing in the compositor:
+    /// the plane it reads is a downsampled blur of the whole mask.)
+    Disturbance,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
@@ -36,11 +45,17 @@ impl LayerEffect {
     pub fn blur(radius: f32) -> Self {
         LayerEffect { kind: EffectKind::Blur, enabled: true, amount: radius }
     }
+
+    /// `amount` is the reach of the bend, 0..1.
+    pub fn disturbance(amount: f32) -> Self {
+        LayerEffect { kind: EffectKind::Disturbance, enabled: true, amount }
+    }
 }
 
 pub fn kind_name(k: &EffectKind) -> &'static str {
     match k {
         EffectKind::Blur => "blur",
+        EffectKind::Disturbance => "disturbance",
     }
 }
 
@@ -57,4 +72,18 @@ pub fn blur_amount(fx: &[LayerEffect]) -> f32 {
         .map(|e| e.amount)
         .fold(0.0, f32::max)
         .max(0.0)
+}
+
+/**
+ * How far the flow is bent around this layer's mask, `0` for not at all.
+ *
+ * Same "larger wins" rule as blur: two disturbance effects is a mistake, and
+ * stacking them would give a reach neither slider says.
+ */
+pub fn disturbance_amount(fx: &[LayerEffect]) -> f32 {
+    fx.iter()
+        .filter(|e| e.enabled && e.kind == EffectKind::Disturbance)
+        .map(|e| e.amount)
+        .fold(0.0, f32::max)
+        .clamp(0.0, 1.0)
 }

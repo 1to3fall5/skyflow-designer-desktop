@@ -7,10 +7,12 @@ use super::buf::Buf;
 use super::effect::LayerEffect;
 use super::ops::upscale;
 use super::{Engine, LayerKind, LayerSnapshot};
+use super::path::PathData;
 
 const MAGIC: &[u8; 6] = b"SKYFLW";
 /// v2 replaced a layer's bare `blur` radius with a list of effects.
-const FORMAT_VERSION: u32 = 2;
+/// v3 moved an obstacle layer's `disturbance` fields into that same list.
+const FORMAT_VERSION: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Reference image
@@ -296,9 +298,12 @@ struct LayerParamsV1 {
 }
 
 impl ProjectV1 {
-    fn upgrade(self) -> ProjectData {
-        ProjectData {
-            version: FORMAT_VERSION,
+    /// v1 -> v2. The bare blur radius becomes the effect it always meant.
+    /// The disturbance is still a pair of fields at this stage, so it rides
+    /// along untouched for the next step to deal with.
+    fn upgrade(self) -> ProjectV2 {
+        ProjectV2 {
+            _version: 2,
             size: self.size,
             projection: self.projection,
             polar_angle: self.polar_angle,
@@ -309,8 +314,8 @@ impl ProjectV1 {
                 .into_iter()
                 .map(|s| {
                     let p = s.p;
-                    LayerSnapshot {
-                        p: super::LayerParams {
+                    LayerSnapshotV2 {
+                        p: LayerParamsV2 {
                             id: p.id,
                             name: p.name,
                             kind: p.kind,
@@ -327,6 +332,102 @@ impl ProjectV1 {
                         buf: s.buf,
                         mask: s.mask,
                         paths: Vec::new(),
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
+// -- v2 -------------------------------------------------------------------
+//
+// v3 turned an obstacle layer's disturbance into an effect like any other,
+// which is what it always was: something done *to* the layer's mask, not a
+// property of the layer. The two fields are gone from `LayerParams`, so a v2
+// file needs its switched-on disturbance turned into the effect it meant —
+// otherwise opening one would silently stop the flow bending around your
+// obstacles, with nothing on screen to say why.
+
+#[derive(Deserialize)]
+struct ProjectV2 {
+    /// Same as v1: the version is in the header too, but the body has one and
+    /// the array has to line up.
+    _version: u32,
+    size: usize,
+    projection: u8,
+    polar_angle: f32,
+    active: String,
+    layers: Vec<LayerSnapshotV2>,
+    reference: Option<Vec<u8>>,
+}
+
+#[derive(Deserialize)]
+struct LayerSnapshotV2 {
+    p: LayerParamsV2,
+    buf: Vec<u8>,
+    mask: Option<Vec<u8>>,
+    #[serde(default)]
+    paths: Vec<PathData>,
+}
+
+#[derive(Deserialize)]
+struct LayerParamsV2 {
+    id: String,
+    name: String,
+    kind: LayerKind,
+    visible: bool,
+    opacity: f32,
+    #[serde(default)]
+    effects: Vec<LayerEffect>,
+    #[serde(default)]
+    legacy_blur: f32,
+    direction: f32,
+    strength: f32,
+    disturbance_enabled: bool,
+    disturbance: f32,
+    has_mask: bool,
+}
+
+impl ProjectV2 {
+    fn upgrade(self) -> ProjectData {
+        ProjectData {
+            version: FORMAT_VERSION,
+            size: self.size,
+            projection: self.projection,
+            polar_angle: self.polar_angle,
+            active: self.active,
+            reference: self.reference,
+            layers: self
+                .layers
+                .into_iter()
+                .map(|s| {
+                    let p = s.p;
+                    let mut effects = p.effects;
+                    // Only an obstacle ever read those two fields — on any
+                    // other kind they were dead weight, so migrating them
+                    // would add an effect that provably does nothing.
+                    if p.kind == LayerKind::Obstacle
+                        && p.disturbance_enabled
+                        && p.disturbance > 0.0
+                    {
+                        effects.push(LayerEffect::disturbance(p.disturbance));
+                    }
+                    LayerSnapshot {
+                        p: super::LayerParams {
+                            id: p.id,
+                            name: p.name,
+                            kind: p.kind,
+                            visible: p.visible,
+                            opacity: p.opacity,
+                            effects,
+                            legacy_blur: p.legacy_blur,
+                            direction: p.direction,
+                            strength: p.strength,
+                            has_mask: p.has_mask,
+                        },
+                        buf: s.buf,
+                        mask: s.mask,
+                        paths: s.paths,
                     }
                 })
                 .collect(),
@@ -386,7 +487,10 @@ pub fn load_project(path: &str) -> Result<Engine, String> {
     let body = zstd::stream::decode_all(&raw[10..]).map_err(|e| format!("解压失败: {e}"))?;
     let proj: ProjectData = if version == 1 {
         let v1: ProjectV1 = rmp_serde::from_slice(&body).map_err(|e| format!("解析失败: {e}"))?;
-        v1.upgrade()
+        v1.upgrade().upgrade()
+    } else if version == 2 {
+        let v2: ProjectV2 = rmp_serde::from_slice(&body).map_err(|e| format!("解析失败: {e}"))?;
+        v2.upgrade()
     } else if version == FORMAT_VERSION {
         rmp_serde::from_slice(&body).map_err(|e| format!("解析失败: {e}"))?
     } else {

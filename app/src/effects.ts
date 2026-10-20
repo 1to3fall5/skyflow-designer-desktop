@@ -15,7 +15,9 @@
  * `engine::effect::LayerEffect` field for field.
  */
 
-export type EffectKind = 'blur';
+import type { LayerKind } from './api';
+
+export type EffectKind = 'blur' | 'disturbance';
 
 export interface LayerEffect {
   kind: EffectKind;
@@ -30,6 +32,8 @@ export const FX_META: Record<EffectKind, {
   min: number;
   max: number;
   step: number;
+  /** How the amount reads. A radius is a number of pixels; a reach is a %. */
+  unit: 'px' | '%';
   title: string;
 }> = {
   blur: {
@@ -37,15 +41,44 @@ export const FX_META: Record<EffectKind, {
     min: 0,
     max: 64,
     step: 1,
+    unit: 'px',
     title: '柔和这一层自己的像素，边缘不再生硬。改的是「怎么呈现」，不动内容本身。',
+  },
+  disturbance: {
+    label: '绕流',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    unit: '%',
+    title: '让下方的流沿着这一层的遮罩边缘分开、绕着走，而不是直直撞上去。' +
+      '范围越大，拐弯发生得越早、越远。',
   },
 };
 
-/** Kinds that can be added from the toolbar, in the order they are offered. */
-export const ADDABLE: EffectKind[] = ['blur'];
+/**
+ * What can be added to a layer of this kind, in the order it is offered.
+ *
+ * The disturbance is the one effect that is not about pixels: it is about
+ * *this layer's mask*, which only an obstacle layer has. Offering it on a
+ * paint layer would be a dial that does nothing.
+ */
+export const ADDABLE_BY_KIND: Record<LayerKind, EffectKind[]> = {
+  paint: ['blur'],
+  path: ['blur'],
+  wind: ['blur'],
+  obstacle: ['disturbance'],
+};
 
+/** The kind's default strength, so a new effect is visible the moment it lands. */
 export function makeEffect(kind: EffectKind): LayerEffect {
-  return { kind, enabled: true, amount: kind === 'blur' ? 12 : 0 };
+  return { kind, enabled: true, amount: kind === 'blur' ? 12 : 0.5 };
+}
+
+/** Read an amount the way the user sees it: a radius in px, a reach in %. */
+export function formatAmount(kind: EffectKind, amount: number): string {
+  return FX_META[kind].unit === '%'
+    ? `${Math.round(amount * 100)}%`
+    : `${amount | 0}`;
 }
 
 /**
