@@ -280,20 +280,69 @@ describe('brush flow: each pointer stroke gets its own id', () => {
   });
 });
 
-describe('brush flow: strength is the ceiling, flow is the rate', () => {
+describe('brush: strength is the ceiling, 透明度 is the rate', () => {
   /**
    * These are two different things and both have to reach the engine. Strength
    * is the flow vector length you are aiming at (Photoshop's foreground
-   * colour); flow is how much of the remaining distance one stroke covers
+   * colour); the rate is how much of the remaining distance one stroke covers
    * (Photoshop's flow). Collapsing them is what made a gentle brush creep up
    * to full strength the longer you painted.
    */
-  it('exposes a flow slider, defaulting to a full-strength stroke', () => {
+  it('exposes a 透明度 slider, defaulting to a full-strength stroke', () => {
     expect(src).toMatch(/useState\(1\.0\)/);
-    expect(src).toMatch(/label="流量"/);
+    expect(src).toMatch(/label="透明度"/);
     // ...and it is not wired to the same state as strength.
     expect(src).toMatch(/const \[brushFlow, setBrushFlow\]/);
     expect(src).toMatch(/const \[brushStrength, setBrushStrength\]/);
+  });
+
+  it('reads 透明度 the way the label does: full slider is opaque', () => {
+    // The slider itself is still bound to the rate — right is 一笔到位, like
+    // Photoshop's opacity — so the number has to be the *transparency*, or a
+    // label saying 透明度 would print 100% for the one setting that hides
+    // nothing at all.
+    expect(src).toMatch(/display=\{`\$\{Math\.round\(\(1 - brushFlow\) \* 100\)\}%`\}/);
+  });
+
+  it('pairs the tip sliders and the ink sliders, not four in a row', () => {
+    const bar = src.slice(
+      src.indexOf("tool === 'brush' || tool === 'eraser'"),
+      src.indexOf("tool === 'brush' || tool === 'eraser'") + 1600,
+    );
+    // 大小 + 硬度 are the tip; 强度 + 透明度 are what you paint with.
+    expect(bar.indexOf('label="大小"')).toBeLessThan(bar.indexOf('label="硬度"'));
+    expect(bar.indexOf('label="硬度"')).toBeLessThan(bar.indexOf('label="强度"'));
+    expect(bar.indexOf('label="强度"')).toBeLessThan(bar.indexOf('label="透明度"'));
+    expect(bar).toMatch(/<div className="ob-group">/);
+    expect(rawStyles).toMatch(/\.ob-group \{ display: flex; align-items: center; gap: 6px;/);
+  });
+
+  it('prints one unit per kind of thing, not four decimals', () => {
+    // 大小 is px; the rest are percentages. A bar that shows 0.25 next to 25%
+    // makes you convert in your head to compare two sliders that sit 40px
+    // apart, which is the one thing a row of sliders must not ask for.
+    const bar = src.slice(
+      src.indexOf("tool === 'brush' || tool === 'eraser'"),
+      src.indexOf("tool === 'brush' || tool === 'eraser'") + 1600,
+    );
+    expect(bar).toMatch(/display=\{String\(brushSize \| 0\)\}/);
+    expect(bar).toMatch(/display=\{`\$\{Math\.round\(brushHardness \* 100\)\}%`\}/);
+    expect(bar).toMatch(/display=\{`\$\{Math\.round\(brushStrength \* 100\)\}%`\}/);
+  });
+
+  it('keeps a hint on one line instead of folding it into a column', () => {
+    // Left to wrap, the flex row turns a sentence into a vertical strip of
+    // single characters — the classic "the hint looks broken" bug.
+    expect(rawStyles).toMatch(/white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;/);
+  });
+
+  it('gives 强度 a swatch, because it is the foreground', () => {
+    expect(src).toMatch(/function StrengthSwatch\(\{ value \}: \{ value: number \}\)/);
+    expect(src).toMatch(/swatch=\{brushStrength\}/);
+    expect(rawStyles).toMatch(/\.swatch \{/);
+    // Deep grey at the bottom, not black: a swatch that vanishes into the
+    // panel at low strength reads as broken rather than as "nothing".
+    expect(src).toMatch(/Math\.round\(26 \+/);
   });
 
   it('sends flow from both painters', () => {

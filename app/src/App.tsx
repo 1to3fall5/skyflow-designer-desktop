@@ -935,7 +935,7 @@ export default function App() {
         <Section title={PARAM_SECT[activeLayer.kind]}>
           {activeLayer.kind === 'paint' && (
             <p className="note">
-              这一层的像素是笔迹本身。大小、强度、流量、硬度都在顶部选项栏里，
+              这一层的像素是笔迹本身。大小 / 硬度 / 强度 / 透明度都在顶部选项栏里，
               画到下层遮罩上就会在遮罩处盖住下面的图层。
             </p>
           )}
@@ -1288,12 +1288,27 @@ export default function App() {
 
           {(tool === 'brush' || tool === 'eraser') && (
             <>
-              <Slider label="大小" value={brushSize} min={1} max={200} step={1} onChange={setBrushSize} display={String(brushSize | 0)} />
-              <Slider label="强度" value={brushStrength} min={0.01} max={1} step={0.01} onChange={setBrushStrength}
-                title="想画到的流动强度上限（类似 Photoshop 的前景色）。反复涂抹只会趋近这个值，不会越涂越强。" />
-              <Slider label="流量" value={brushFlow} min={0.01} max={1} step={0.01} onChange={setBrushFlow}
-                title="每一笔走完「到强度上限的剩余距离」的比例（类似 Photoshop 的流量）。流量 1 一笔到位；流量 0.25 要涂七八笔才接近上限，中间会把下层风向平滑地掰过来。" />
-              <Slider label="硬度" value={brushHardness} min={0} max={1} step={0.01} onChange={setBrushHardness} />
+              {/* Two pairs, not four sliders in a row. 大小 and 硬度 are both
+                  the *tip* — how wide it is and how hard its edge is, which is
+                  how Photoshop's brush panel groups them. 强度 and 透明度 are
+                  the other pair: what you paint with, and how much of it lands
+                  in one pass. The divider is the whole signal; without it the
+                  bar is a ruler of unrelated numbers. */}
+              <div className="ob-group">
+                <Slider label="大小" value={brushSize} min={1} max={200} step={1} onChange={setBrushSize} display={String(brushSize | 0)} />
+                <Slider label="硬度" value={brushHardness} min={0} max={1} step={0.01} onChange={setBrushHardness}
+                  display={`${Math.round(brushHardness * 100)}%`} />
+              </div>
+              <span className="ob-sep" />
+              <div className="ob-group">
+                <Slider label="强度" value={brushStrength} min={0.01} max={1} step={0.01} onChange={setBrushStrength}
+                  swatch={brushStrength}
+                  display={`${Math.round(brushStrength * 100)}%`}
+                  title="想画到的流动强度上限（类似 Photoshop 的前景色）。反复涂抹只会趋近这个值，不会越涂越强。" />
+                <Slider label="透明度" value={brushFlow} min={0.01} max={1} step={0.01} onChange={setBrushFlow}
+                  display={`${Math.round((1 - brushFlow) * 100)}%`}
+                  title="一笔能落下多少。0% 一笔到位、完全不透明；越往左越透明，同一处要涂好几笔才接近强度（类似 Photoshop 的流量）。" />
+              </div>
               {/* The gesture is undiscoverable: it is a modifier plus the button
                   you never press. Photoshop has the same problem and solves it
                   the same way — by saying it somewhere. */}
@@ -1307,13 +1322,21 @@ export default function App() {
                   brush you would draw the next one with — which is the whole
                   substance of "non-destructive": the stroke keeps its own
                   settings and you can retune it after the fact. */}
-              <Slider label="大小" value={penInfo.brush?.size ?? brushSize} min={1} max={200} step={1}
-                onChange={(v) => tunePen('size', v)} display={String((penInfo.brush?.size ?? brushSize) | 0)} />
+              {/* Same two pairs as the brush: tip, then ink. A path's brush is a
+                  brush, so it should not be laid out differently just because
+                  it also happens to be editable. */}
+              <div className="ob-group">
+                <Slider label="大小" value={penInfo.brush?.size ?? brushSize} min={1} max={200} step={1}
+                  onChange={(v) => tunePen('size', v)} display={String((penInfo.brush?.size ?? brushSize) | 0)} />
+                <Slider label="硬度" value={penInfo.brush?.hardness ?? brushHardness} min={0} max={1} step={0.01}
+                  onChange={(v) => tunePen('hardness', v)}
+                  display={`${Math.round((penInfo.brush?.hardness ?? brushHardness) * 100)}%`} />
+              </div>
+              <span className="ob-sep" />
               <Slider label="强度" value={penInfo.brush?.strength ?? brushStrength} min={0.01} max={1} step={0.01}
-                onChange={(v) => tunePen('strength', v)}
-                title="这条路径想画到的流动强度上限。路径只画一遍，所以一笔就是到位，流量对钢笔没有意义。" />
-              <Slider label="硬度" value={penInfo.brush?.hardness ?? brushHardness} min={0} max={1} step={0.01}
-                onChange={(v) => tunePen('hardness', v)} />
+                onChange={(v) => tunePen('strength', v)} swatch={penInfo.brush?.strength ?? brushStrength}
+                display={`${Math.round((penInfo.brush?.strength ?? brushStrength) * 100)}%`}
+                title="这条路径想画到的流动强度上限。路径只画一遍，所以一笔就是到位，透明度对钢笔没有意义。" />
               {penInfo.sel >= 0 && (
                 <button className="ob-btn" title="删除选中的路径（Backspace）"
                   onClick={() => paintRef.current?.penPop()}>删除路径</button>
@@ -1713,12 +1736,29 @@ function IconBtn({ icon, title, onClick, disabled, danger }:
   );
 }
 
-function Slider({ label, value, min = 0, max = 1, step = 0.01, onChange, display, title }:
+/**
+ * Photoshop's foreground swatch, for a value that has no colour.
+ *
+ * 强度 *is* the foreground: it is what a stroke paints toward, and the only
+ * thing about the brush that survives into the pixels. So it gets the one
+ * piece of furniture PS gives to the thing you paint with — a swatch beside
+ * the slider, whose brightness *is* the value.
+ *
+ * The floor is deep grey rather than black: a swatch that disappears into the
+ * panel at low strength reads as "broken", not as "nothing".
+ */
+function StrengthSwatch({ value }: { value: number }) {
+  const v = Math.round(26 + Math.max(0, Math.min(1, value)) * 229);
+  return <span className="swatch" style={{ background: `rgb(${v},${v},${v})` }} />;
+}
+
+function Slider({ label, value, min = 0, max = 1, step = 0.01, onChange, display, title, swatch }:
   { label: string; value: number; min?: number; max?: number; step?: number;
-    onChange: (v: number) => void; display?: string; title?: string }) {
+    onChange: (v: number) => void; display?: string; title?: string; swatch?: number }) {
   return (
     <div className="slider" title={title}>
       <span>{label}</span>
+      {swatch !== undefined && <StrengthSwatch value={swatch} />}
       <input type="range" min={min} max={max} step={step} value={value}
         onChange={(e) => onChange(Number(e.target.value))} />
       <b>{display ?? value.toFixed(2)}</b>
