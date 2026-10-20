@@ -10,6 +10,9 @@ import {
 } from '../pen';
 import { NON_PAINTING_TOOLS, type Tool } from '../shortcuts';
 import { createFlowWarp, type FlowWarp } from '../flowWarp';
+import {
+  ARROW_DASH_CELLS, ARROW_DASH_GAP_CELLS, ARROW_DASH_CELLS_PER_SEC,
+} from '../arrows';
 
 export interface PaintViewHandle {
   applySnapshot: (s: Snapshot) => void;
@@ -405,10 +408,9 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
    *
    * Re-sampling means a `drawImage` down to 128² plus a `getImageData` — far
    * too much to do 60 times a second, and it only changes when the pixels do.
-   * The two paths are built once too, so a frame is: clear, one dashed
-   * stroke, one fill.
+   * The shafts are built once too, so a frame is: clear, one dashed stroke.
    */
-  const arrowGeom = useRef<{ shaft: Path2D; head: Path2D; step: number } | null>(null);
+  const arrowGeom = useRef<{ shaft: Path2D; step: number } | null>(null);
 
   /** Draw the cached arrows. `dash` is the marching offset, or null for solid. */
   const drawArrows = useCallback((dash: number | null) => {
@@ -419,21 +421,24 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     if (!ctx) return;
     ctx.clearRect(0, 0, ac.width, ac.height);
     if (!g) return;
-    const d = Math.max(3, g.step * 0.16);
+    // Dash and gap come from src/arrows.ts so the 3D shader marches at exactly
+    // the same rhythm. The 3px floor keeps them visible when 密度 packs the grid
+    // tight; the shader needs no such floor, it works in cells.
+    const d = Math.max(3, g.step * ARROW_DASH_CELLS);
     if (dash !== null) {
-      // The shafts run tail -> head, so a *decreasing* offset carries the
-      // dashes downstream. Increasing it would make the field flow backwards,
+      // The shafts run tail -> downstream, so a *decreasing* offset carries the
+      // dashes that way. Increasing it would make the field flow backwards,
       // which is worse than not animating at all.
-      ctx.setLineDash([d, d * 1.15]);
+      ctx.setLineDash([d, d * (ARROW_DASH_GAP_CELLS / ARROW_DASH_CELLS)]);
       ctx.lineDashOffset = -dash;
     } else {
       ctx.setLineDash([]);
     }
+    // No arrowhead, and no fill: what says which way the field runs is the dash
+    // marching downstream, not a triangle on the end.
     ctx.strokeStyle = 'rgba(251, 191, 36, 0.6)';
-    ctx.fillStyle = 'rgba(251, 191, 36, 0.6)';
     ctx.lineWidth = 1;
     ctx.stroke(g.shaft);
-    ctx.fill(g.head);
     ctx.setLineDash([]);
   }, []);
 
@@ -465,7 +470,6 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     const step = Math.max(16, 128 - p.arrowDensity);
     const sStep = step / scale;
     const shaft = new Path2D();
-    const head = new Path2D();
     for (let sy = sStep / 2; sy < ARROW_SAMPLE; sy += sStep) {
       for (let sx = sStep / 2; sx < ARROW_SAMPLE; sx += sStep) {
         const i = ((sy | 0) * ARROW_SAMPLE + (sx | 0)) * 4;
@@ -484,13 +488,9 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
         const half = len / 2;
         shaft.moveTo(x - half * cos, y - half * sin);
         shaft.lineTo(x + half * cos, y + half * sin);
-        head.moveTo(x + half * cos, y + half * sin);
-        head.lineTo(x + (half - 4) * cos + 3 * sin, y + (half - 4) * sin - 3 * cos);
-        head.lineTo(x + (half - 4) * cos - 3 * sin, y + (half - 4) * sin + 3 * cos);
-        head.closePath();
       }
     }
-    arrowGeom.current = { shaft, head, step };
+    arrowGeom.current = { shaft, step };
     drawArrows(animDash.current);
   }, [drawArrows]);
 
@@ -1173,9 +1173,13 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     const tick = (now: number) => {
       const dt = Math.min((now - last) / 1000, 0.1);
       last = now;
-      // One grid cell per second at speed 1: fast enough to read as flow,
-      // slow enough that the arrows are still arrows.
-      animDash.current = (animDash.current ?? 0) + dt * p.animSpeed * (p.size / 8);
+      // Dashes travel a fixed number of *cells* per second, the same rule the
+      // 3D shader uses, so the two halves of a split march in step. Measured in
+      // pixels it scaled with the canvas instead: 4096² ran four times faster
+      // than 1024² at the same speed.
+      const cell = arrowGeom.current?.step ?? p.size / 8;
+      animDash.current =
+        (animDash.current ?? 0) + dt * p.animSpeed * ARROW_DASH_CELLS_PER_SEC * cell;
       drawArrows(animDash.current);
       raf = requestAnimationFrame(tick);
     };

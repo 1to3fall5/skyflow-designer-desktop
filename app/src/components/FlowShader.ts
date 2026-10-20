@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { ARROW_DASH_PERIOD_CELLS, ARROW_DASH_DUTY } from '../arrows';
 
 export const SKY_VERT = /* glsl */ `
   varying vec2 vUv;
@@ -124,6 +125,7 @@ export const ARROW_FRAG = /* glsl */ `
   uniform vec3 uColor;
   uniform float uProjectionType;
   uniform float uPolarAngle;
+  uniform float uDash;
 
   varying vec2 vUv;
 
@@ -162,25 +164,19 @@ export const ARROW_FRAG = /* glsl */ `
     float thickness = 0.005;
     float len = min(0.4, mag * 0.8 + 0.1);
     float dShaft = max(abs(rotatedUV.y) - thickness, abs(rotatedUV.x) - len);
-
-    float headSz = len / 8.0;
-    vec2 tip = vec2(len, 0.0);
-    vec2 p = rotatedUV;
-
-    vec2 wingEnd = vec2(len - headSz, headSz);
-    vec2 v = wingEnd - tip;
-    vec2 w = p - tip;
-    float h = clamp(dot(w, v) / dot(v, v), 0.0, 1.0);
-    float dWing1 = length(w - v * h) - thickness;
-
-    vec2 wingEnd2 = vec2(len - headSz, -headSz);
-    vec2 v2 = wingEnd2 - tip;
-    float h2 = clamp(dot(w, v2) / dot(v2, v2), 0.0, 1.0);
-    float dWing2 = length(w - v2 * h2) - thickness;
-
-    float dArrow = min(dShaft, min(dWing1, dWing2));
-    float alpha = 1.0 - smoothstep(0.0, 0.02, dArrow);
+    float alpha = 1.0 - smoothstep(0.0, 0.02, dShaft);
     if (alpha < 0.1) discard;
+
+    // No arrowhead: what says which way the field runs is the dash marching
+    // downstream, not a triangle on the end. t runs 0 at the tail to 2*len
+    // at the downstream end, and subtracting uDash walks the pattern that way —
+    // the same sense as the 2D canvas, where a *decreasing* lineDashOffset
+    // carries the dashes downstream. uDash < 0 is paused, and a still frame
+    // wants solid shafts: dashes only read in motion.
+    if (uDash >= 0.0) {
+      float t = rotatedUV.x + len;
+      if (fract(t / ${ARROW_DASH_PERIOD_CELLS.toFixed(5)} - uDash) > ${ARROW_DASH_DUTY.toFixed(5)}) discard;
+    }
 
     float opacity = min(1.0, mag * 3.0);
     gl_FragColor = vec4(uColor, alpha * opacity);
@@ -222,6 +218,8 @@ export function createArrowMaterial() {
       uColor: { value: new THREE.Color('#fbbf24') },
       uProjectionType: { value: 0 },
       uPolarAngle: { value: Math.PI / 2 },
+      // Negative means "solid": a paused frame wants unbroken shafts.
+      uDash: { value: -1 },
     },
     vertexShader: SKY_VERT,
     fragmentShader: ARROW_FRAG,

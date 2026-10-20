@@ -19,6 +19,8 @@ import rawApi from './api?raw';
 import rawShortcuts from './shortcuts?raw';
 import rawIcons from './icons?raw';
 import rawFlowWarp from './flowWarp?raw';
+import rawArrows from './arrows?raw';
+import rawFlowShader from './components/FlowShader?raw';
 // Vite's CSS plugin turns `styles.css?raw` into an empty string, so read
 // the source straight off disk. Everything else here uses `?raw`.
 import { readFileSync } from 'node:fs';
@@ -33,6 +35,8 @@ const src = strip(rawSrc);
 const paintView = strip(rawPaintView);
 const preview3D = strip(rawPreview3D);
 const flowWarp = strip(rawFlowWarp);
+const arrows = strip(rawArrows);
+const flowShader = strip(rawFlowShader);
 
 /** Commands whose result must be pushed into React state, not just pixels. */
 const STRUCTURAL = [
@@ -376,7 +380,7 @@ describe('2D flow animation: the arrows have to move', () => {
   it('does not re-sample the composite on every frame', () => {
     // Sampling is a drawImage down to 128² plus a getImageData — fine on a
     // stroke, far too much at 60 Hz. It only runs when the pixels change.
-    expect(paintView).toMatch(/arrowGeom\.current = \{ shaft, head, step \};/);
+    expect(paintView).toMatch(/arrowGeom\.current = \{ shaft, step \};/);
     const draw = paintView.slice(
       paintView.indexOf('const drawArrows = useCallback'),
       paintView.indexOf('const refreshArrows = useCallback'),
@@ -389,6 +393,48 @@ describe('2D flow animation: the arrows have to move', () => {
     expect(paintView).toMatch(
       /if \(!p\.showArrows \|\| p\.animSpeed <= 0\) \{[\s\S]*?animDash\.current = null;[\s\S]*?drawArrows\(null\);/,
     );
+  });
+});
+
+describe('arrows: no head, the dash carries the direction', () => {
+  /**
+   * The arrowhead was the thing that said which way the field ran — and it was
+   * the one part that could not animate without looking like the field itself
+   * was sliding. In a dense field a head on every segment is a picket fence.
+   * What is left is the shaft, and the dash marching downstream.
+   */
+  it('drops the arrowhead from both renderers', () => {
+    expect(flowShader).not.toMatch(/dWing|headSz/);
+    expect(paintView).not.toMatch(/new Path2D\(\);\s*\n\s*const head/);
+    expect(paintView).not.toMatch(/ctx\.fill\(g\.head\)/);
+  });
+
+  it('marches the 3D arrows too', () => {
+    // Before this the 3D arrows were static: ARROW_FRAG had no time in it at
+    // all, so 播放动画 moved the sky on the right and nothing on the left.
+    expect(flowShader).toMatch(/uniform float uDash;/);
+    expect(preview3D).toMatch(/au\.uDash\.value = ctx\.arrowDash;/);
+    expect(preview3D).toMatch(/ARROW_DASH_CELLS_PER_SEC/);
+  });
+
+  it('marches downstream, measured not reasoned', () => {
+    // Same uniform flow, one arrow per cell, profile of the ink, cross-
+    // correlated between phases: +2 px per step with the downstream end to the
+    // right, -2 px with it to the left. A growing offset would have flipped it.
+    expect(flowShader).toMatch(/fract\(t \/ \$\{ARROW_DASH_PERIOD_CELLS[^}]*\} - uDash\)/);
+  });
+
+  it('goes solid when paused, in 3D as well as 2D', () => {
+    expect(flowShader).toMatch(/if \(uDash >= 0\.0\)/);
+    expect(preview3D).toMatch(/au\.uDash\.value = -1;/);
+  });
+
+  it('measures the dash in cells, so speed does not depend on canvas size', () => {
+    // In pixels it scaled with the canvas: the same 速度 ran four times faster
+    // at 4096² than at 1024².
+    expect(arrows).toMatch(/ARROW_DASH_CELLS_PER_SEC/);
+    expect(paintView).toMatch(/ARROW_DASH_CELLS_PER_SEC \* cell/);
+    expect(paintView).not.toMatch(/p\.animSpeed \* \(p\.size \/ 8\)/);
   });
 });
 

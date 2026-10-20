@@ -4,6 +4,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { createSkyMaterial, createArrowMaterial } from './FlowShader';
 import { nextCursor, shouldClearOnLeave, type CursorUV } from '../cursor';
 import { NON_PAINTING_TOOLS, type Tool } from '../shortcuts';
+import { ARROW_DASH_CELLS_PER_SEC, ARROW_DASH_PERIOD_CELLS } from '../arrows';
 
 /**
  * 3D preview. Port of the original R3F `PreviewScene` without React Three
@@ -203,6 +204,8 @@ export const Preview3D = React.forwardRef<Preview3DHandle, Preview3DProps>((prop
     planeAspect: number;
     dragging: boolean;
     rightDown: boolean;
+    /** How far the arrow dashes have marched, in dash periods. */
+    arrowDash: number;
     /** Alt + right drag — the brush HUD. Also what keeps `rightDown` off. */
     brushScrub: { x: number; y: number } | null;
     keys: Record<string, boolean>;
@@ -307,6 +310,7 @@ export const Preview3D = React.forwardRef<Preview3DHandle, Preview3DProps>((prop
       planeAspect: 2,
       dragging: false,
       rightDown: false,
+      arrowDash: 0,
       brushScrub: null as { x: number; y: number } | null,
       keys: {} as Record<string, boolean>,
       localHover: false,
@@ -586,6 +590,15 @@ export const Preview3D = React.forwardRef<Preview3DHandle, Preview3DProps>((prop
       au.uPolarAngle.value = (p.polarAngle * Math.PI) / 180;
       const [gx, gy] = arrowGrid(p.arrowDensity, p.projection, ctx.planeAspect);
       au.uGridSize.value.set(gx, gy);
+      // The dash travels a fixed number of *cells* per second, the same rule the
+      // 2D canvas uses, so the two halves of a split march in step. Paused is
+      // not "phase 0": the shader draws solid shafts instead.
+      if (p.speed > 0) {
+        ctx.arrowDash += (dt * p.speed * ARROW_DASH_CELLS_PER_SEC) / ARROW_DASH_PERIOD_CELLS;
+        au.uDash.value = ctx.arrowDash;
+      } else {
+        au.uDash.value = -1;
+      }
 
       arrowSphere.visible = p.showArrows && skySphere.visible;
       arrowPlane.visible = p.showArrows && skyPlane.visible;
