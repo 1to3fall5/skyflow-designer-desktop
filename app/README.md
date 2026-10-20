@@ -595,6 +595,24 @@ mix(texture(uSky, uv + dir * p1 * uDistortion),
 
 `animating` 默认 true——改之前它在 2D 里是个什么都不动的开关。
 
+## 3D 绘制：每帧一次往返，不是每次鼠标上报
+
+在 3D 视图里画会顿，像在等某个计算。查下来三件事都是 3D 独有的，而且**都不是引擎**
+——引擎侧每次 `stroke` 只做脏矩形的合成，2D 走同一条路并不卡。
+
+- **笔画按帧合并**。`pointermove` 比帧更密，3D 以前是**每个事件**发一次 IPC；2D
+  一直有一个 flush 循环，一帧只发一次，把这一帧的点串成一条折线。现在 3D 也是：
+  点进 `ctx.paintQ`，渲染循环开头 `flushPaint()` 一次带走，松手时再补一次。
+- **不再每帧重传整张 flowmap**。`ctx.seenVersion !== version || ctx.dragging` 里
+  那个 `|| ctx.dragging` 让一次笔画的**每一帧**都上传 4 MB，而其中绝大部分帧像素
+  根本没变。每次像素变化都会在同一个 tick 里 bump 版本号（`applySnap` 写完画布
+  紧接着 bump），所以版本号检查就够了。
+- **看不见的窗格不做动画**。3D 单视图下 2D 窗格是隐藏的，但它照旧每帧给箭头描一遍
+  虚线、照旧往 WebGL 里传贴图。`visible` 为 false 时两个动画循环直接停。
+- **跨接缝不连线**。越过 `u = 0/1` 接缝（或者是绕到极点另一侧）时，两点的"线段"
+  是横贯画布的一整条——画出来是一道刷满全图的笔痕，同时也是引擎能被要求做的最贵
+  的一件事。超过 `SEAM_JUMP`（0.25 UV）就断开重起一段。
+
 ## 相比 Web 版的性能改进
 
 | 环节 | Web 版 | 桌面版 |
@@ -730,7 +748,7 @@ npx tauri build        # 产出 NSIS / MSI 安装包，约 3 分钟
 ## 测试
 
 ```bash
-npm test          # 前端 326 + Rust 90，共 416 个用例
+npm test          # 前端 330 + Rust 90，共 420 个用例
 npm run test:fe   # 仅前端（vitest）
 npm run test:rust # 仅引擎（cargo test）
 npm run test:watch

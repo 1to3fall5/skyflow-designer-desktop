@@ -101,7 +101,16 @@ export interface Preview3DProps {
   polarAngle: number;
   paintEnabled: boolean;
   tool: Tool;
-  onPaint?: (u: number, v: number, lu: number, lv: number) => void;
+  /**
+   * One frame's worth of stroke points, tail first.
+   *
+   * A batch, not a segment: pointermove fires far more often than the
+   * frame does, and one IPC per event meant the 3D view spent a brush
+   * stroke's worth of Rust work per *mouse report* — visibly stuttering
+   * on a high-polling mouse. The 2D view has always coalesced to one per
+   * frame; this is the same rule.
+   */
+  onPaint?: (pts: Array<[number, number]>) => void;
   onFill?: (u: number, v: number) => void;
   onPaintEnd?: () => void;
   /** Eyedropper: read the flow strength at this UV. */
@@ -140,6 +149,15 @@ export function brushRadiusUV(brushSize: number, canvasSize: number): number {
   const n = canvasSize > 0 ? canvasSize : 1024;
   return brushSize / (2 * n);
 }
+
+/**
+ * Biggest UV gap that still counts as one mouse move.
+ *
+ * Beyond this the two points are not neighbours on the surface — it is the
+ * u = 0/1 seam, or the pointer appearing on the other side of a pole — and the
+ * segment between them would run the width of the canvas.
+ */
+const SEAM_JUMP = 0.25;
 
 /** Arrow grid (cells across, cells down) for a projection. */
 export function arrowGrid(
@@ -206,6 +224,10 @@ export const Preview3D = React.forwardRef<Preview3DHandle, Preview3DProps>((prop
     rightDown: boolean;
     /** How far the arrow dashes have marched, in dash periods. */
     arrowDash: number;
+    /** Stroke points waiting for the next frame. */
+    paintQ: Array<[number, number]>;
+    /** Last point already sent, so the next batch starts where it ended. */
+    paintLast: [number, number] | null;
     /** Alt + right drag — the brush HUD. Also what keeps `rightDown` off. */
     brushScrub: { x: number; y: number } | null;
     keys: Record<string, boolean>;
@@ -311,6 +333,8 @@ export const Preview3D = React.forwardRef<Preview3DHandle, Preview3DProps>((prop
       dragging: false,
       rightDown: false,
       arrowDash: 0,
+      paintQ: [] as Array<[number, number]>,
+      paintLast: null as [number, number] | null,
       brushScrub: null as { x: number; y: number } | null,
       keys: {} as Record<string, boolean>,
       localHover: false,
@@ -390,6 +414,22 @@ export const Preview3D = React.forwardRef<Preview3DHandle, Preview3DProps>((prop
       return { u: t.u, v: 1 - t.v };
     };
 
+    /**
+     * Send this frame's stroke points as one call.
+     *
+     * Runs at the top of the render loop, so the most the engine can be asked
+     * for is one stroke per frame — and the points arrive as one polyline
+     * instead of a dozen separate segments.
+     */
+    const flushPaint = () => {
+      const q = ctx.paintQ;
+      if (q.length === 0) return;
+      const pts = ctx.paintLast ? [ctx.paintLast, ...q] : q.slice();
+      ctx.paintLast = pts[pts.length - 1];
+      ctx.paintQ = [];
+      propsRef.current.onPaint?.(pts);
+    };
+
     const onDown = (e: PointerEvent) => {
       const p = propsRef.current;
       // Alt + right drag = the brush HUD, same as the 2D view. It has to win
@@ -426,7 +466,7 @@ export const Preview3D = React.forwardRef<Preview3DHandle, Preview3DProps>((prop
       lastUV.current = c;
       try { el.setPointerCapture(e.pointerId); } catch { /* ignore */ }
       if (p.tool === 'magic_wand') p.onFill?.(c.u, c.v);
-      else p.onPaint?.(c.u, c.v, c.u, c.v);
+      else { ctx.paintQ = [[c.u, c.v]]; ctx.paintLast = null; }
     };
 
     const onMove = (e: PointerEvent) => {
@@ -455,8 +495,20 @@ export const Preview3D = React.forwardRef<Preview3DHandle, Preview3DProps>((prop
         return;
       }
       if (!paintingRef.current) return;
-      const last = lastUV.current ?? c;
-      if (p.tool !== 'magic_wand') p.onPaint?.(c.u, c.v, last.u, last.v);
+      if (p.tool !== 'magic_wand') {
+        // A jump this big is the u = 0/1 seam or the far side of a pole, not a
+        // mouse move: connecting the two would stamp a brush stroke clean
+        // across the whole flowmap, which is both wrong and the most expensive
+        // thing the engine can be asked to do. End the run instead.
+        const prev = ctx.paintQ.length
+          ? ctx.paintQ[ctx.paintQ.length - 1]
+          : ctx.paintLast;
+        if (prev && Math.hypot(c.u - prev[0], c.v - prev[1]) > SEAM_JUMP) {
+          flushPaint();
+          ctx.paintLast = null;
+        }
+        ctx.paintQ.push([c.u, c.v]);
+      }
       lastUV.current = c;
     };
 
@@ -475,6 +527,9 @@ export const Preview3D = React.forwardRef<Preview3DHandle, Preview3DProps>((prop
       paintingRef.current = false;
       ctx.dragging = false;
       lastUV.current = null;
+      // The gesture is over, so whatever is still queued goes now rather than
+      // waiting for a frame that may never come.
+      flushPaint();
       try { el.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
       propsRef.current.onPaintEnd?.();
     };
@@ -543,6 +598,7 @@ export const Preview3D = React.forwardRef<Preview3DHandle, Preview3DProps>((prop
       ctx.raf = requestAnimationFrame(loop);
       const p = propsRef.current;
       const dt = Math.min(ctx.clock.getDelta(), 0.1);
+      flushPaint();
       applyProjection(p.projection);
 
       if (ctx.rightDown) {
@@ -621,7 +677,10 @@ export const Preview3D = React.forwardRef<Preview3DHandle, Preview3DProps>((prop
         au.uFlowMap.value = t;
         ctx.seenVersion = -1;
       }
-      if (ctx.flowTex && (ctx.seenVersion !== p.flowVersionRef.current || ctx.dragging)) {
+      // Every pixel change bumps the version (applySnap does it on the same
+      // tick as the canvas write), so `dragging` here only bought a 4 MB
+      // upload on every frame of a stroke, most of them unchanged.
+      if (ctx.flowTex && ctx.seenVersion !== p.flowVersionRef.current) {
         ctx.seenVersion = p.flowVersionRef.current;
         ctx.flowTex.needsUpdate = true;
       }

@@ -484,6 +484,44 @@ describe('2D flow animation: 天空贴图 has to move too', () => {
   });
 });
 
+describe('3D painting: one round trip per frame, not per mouse report', () => {
+  /**
+   * Painting in the 3D view felt like waiting for a calculation. Three things
+   * were 3D-only and none of them were the engine:
+   */
+  it('coalesces the stroke into one call per frame', () => {
+    // pointermove fires more often than the frame does; the 2D view has always
+    // queued and flushed, the 3D view used to call the engine on every event.
+    expect(preview3D).toMatch(/ctx\.paintQ\.push\(\[c\.u, c\.v\]\)/);
+    expect(preview3D).toMatch(/const flushPaint = \(\) => \{/);
+    expect(preview3D).toMatch(/flushPaint\(\);\s*\n\s*applyProjection/);
+    // Exactly one place sends paint — that is what makes the budget one per frame.
+    expect(preview3D.match(/onPaint\?\.\(/g)?.length).toBe(1);
+  });
+
+  it('stops re-uploading the whole flowmap on every frame of a stroke', () => {
+    // `|| ctx.dragging` uploaded 4 MB a frame while painting, almost all of it
+    // unchanged. Every pixel change already bumps the version on the same tick
+    // as the canvas write, so the version check alone is enough.
+    expect(preview3D).not.toMatch(/flowVersionRef\.current \|\| ctx\.dragging/);
+  });
+
+  it('does not animate a pane that is not on screen', () => {
+    // In the 3D-only view the 2D pane kept dashing its arrows and uploading the
+    // flow texture into a hidden canvas.
+    expect(src).toMatch(/visible=\{viewMode !== '3d'\}/);
+    expect(paintView).toMatch(/if \(!p\.visible\) return;/);
+    expect(paintView).toMatch(/if \(!p\.visible \|\| !p\.showReference/);
+  });
+
+  it('refuses to connect two points across the seam', () => {
+    // Past the u = 0/1 seam (or over a pole) the "segment" runs the width of
+    // the canvas: a brush stroke smeared across the whole flowmap, and the
+    // single most expensive thing the engine can be asked for.
+    expect(preview3D).toMatch(/Math\.hypot\(c\.u - prev\[0\], c\.v - prev\[1\]\) > SEAM_JUMP/);
+  });
+});
+
 describe('number keys: Photoshop opacity, on the brush or on the layer', () => {
   /**
    * PS decides between tool opacity and layer opacity by which tool is out.

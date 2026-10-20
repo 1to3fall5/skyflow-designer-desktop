@@ -1481,6 +1481,7 @@ export default function App() {
               arrowDensity={arrowDensity}
               animSpeed={animSpeed}
               distortion={distortion}
+              visible={viewMode !== '3d'}
               wrap={state.projection !== 'planar'}
               cursorUV={sharedCursor}
               adjusting={adjusting}
@@ -1531,8 +1532,8 @@ export default function App() {
               // has no such layer — it would fall through to `onPaint`'s
               // catch-all and behave as a brush, which is worse than nothing.
               paintEnabled={canPaint && viewMode !== '2d' && tool !== 'pen'}
-              onPaint={(u, v, lu, lv) => {
-                api.stroke([[lu, lv], [u, v]], brushSize, brushHardness, brushStrength,
+              onPaint={(pts) => {
+                api.stroke(pts, brushSize, brushHardness, brushStrength,
                   toolRef.current === 'eraser', effTarget, stroke3d.current, brushFlow).then(applySnap);
               }}
               onFill={(u, v) => {

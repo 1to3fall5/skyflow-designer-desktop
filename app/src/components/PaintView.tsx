@@ -85,6 +85,12 @@ export interface PaintViewProps {
    */
   animSpeed: number;
   /**
+   * False when the 2D pane is hidden (3D-only view). The animation loops are
+   * the whole cost of a hidden view — a dashed stroke over the field's Path2D
+   * every frame, plus a flow texture upload — and none of it is on screen.
+   */
+  visible: boolean;
+  /**
    * How far the field carries 天空贴图, in UV. The 3D shader's
    * `uDistortionStrength` — the same number, so the split agrees.
    */
@@ -1163,6 +1169,7 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
    */
   useEffect(() => {
     const p = propsRef.current;
+    if (!p.visible) return;
     if (!p.showArrows || p.animSpeed <= 0) {
       animDash.current = null;
       drawArrows(null);
@@ -1185,7 +1192,7 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [props.showArrows, props.animSpeed, props.arrowDensity, props.size, drawArrows]);
+  }, [props.showArrows, props.animSpeed, props.arrowDensity, props.size, props.visible, drawArrows]);
 
   /**
    * Decode 天空贴图 once, so pausing and resuming does not re-decode a 4K
@@ -1220,7 +1227,7 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
    */
   useEffect(() => {
     const p = propsRef.current;
-    if (!p.showReference || !p.referenceSrc || p.animSpeed <= 0) {
+    if (!p.visible || !p.showReference || !p.referenceSrc || p.animSpeed <= 0) {
       setWarpLive(false);
       return;
     }
@@ -1256,7 +1263,7 @@ const PaintView = forwardRef<PaintViewHandle, PaintViewProps>((props, ref) => {
     };
     raf = requestAnimationFrame(tick);
     return () => { cancelAnimationFrame(raf); setWarpLive(false); };
-  }, [props.showReference, props.referenceSrc, props.animSpeed, props.size]);
+  }, [props.showReference, props.referenceSrc, props.animSpeed, props.size, props.visible]);
 
   useEffect(() => () => {
     warp.current?.dispose();
