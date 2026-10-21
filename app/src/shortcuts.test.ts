@@ -129,7 +129,15 @@ describe('modifier combos', () => {
     expect(resolveShortcut(key('o', { ctrl: true }))).toEqual({ type: 'file', op: 'open' });
     expect(resolveShortcut(key('s', { ctrl: true }))).toEqual({ type: 'file', op: 'save' });
     expect(resolveShortcut(key('s', { ctrl: true, shift: true }))).toEqual({ type: 'file', op: 'saveAs' });
-    expect(resolveShortcut(key('e', { ctrl: true }))).toEqual({ type: 'file', op: 'export' });
+    expect(resolveShortcut(key('e', { ctrl: true, shift: true }))).toEqual({ type: 'file', op: 'export' });
+  });
+
+  it('gives Ctrl+E to merge-down, because that is what it means in Photoshop', () => {
+    // Export gives up the key. A merge that quietly does nothing is worse than
+    // an export dialog on a different key, and the muscle memory for Ctrl+E is
+    // older than this app.
+    expect(resolveShortcut(key('e', { ctrl: true }))).toEqual({ type: 'merge' });
+    expect(resolveShortcut(key('e', { meta: true }))).toEqual({ type: 'merge' });
   });
 
   it('treats the meta key like ctrl (macOS)', () => {

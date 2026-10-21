@@ -85,6 +85,23 @@ pub struct LayerSnapshot {
     pub paths: Vec<PathData>,
 }
 
+/**
+ * One undo step.
+ *
+ * Ordinarily a step touches one layer, and `order` is `None` — the stack did
+ * not move. A step that *removes* a layer (合并向下) has to be able to put it
+ * back, so it also records the whole stack's id order from before: undo then
+ * rebuilds that shape, recreating any layer it cannot find from the snapshots
+ * it brought along.
+ */
+#[derive(Clone)]
+struct HistoryEntry {
+    /// The layers whose pixels or parameters this step changed.
+    layers: Vec<LayerSnapshot>,
+    /// The stack's id order *before* the step, for steps that changed it.
+    order: Option<Vec<String>>,
+}
+
 // ---------------------------------------------------------------------------
 
 pub struct Engine {
@@ -98,7 +115,7 @@ pub struct Engine {
     pub     projection: Projection,
     pub polar_angle: f32,
     pub full_dirty: bool,
-    history: Vec<Vec<LayerSnapshot>>,
+    history: Vec<HistoryEntry>,
     hist_idx: usize,
     id_counter: u64,
     /// Per-pixel deposit weight for the stroke in progress. See `ops::stamp`.
@@ -337,6 +354,136 @@ impl Engine {
         } else {
             false
         }
+    }
+
+    /**
+     * Merge a layer into the one below it — Photoshop's 向下合并.
+     *
+     * The result has to be *indistinguishable* from the two layers it
+     * replaces, or merging is a way of quietly losing your work. For content
+     * layers that is exact: `over` is associative, and a layer's opacity only
+     * ever enters as `alpha * opacity`, so folding both opacities into the
+     * alpha of one layer reproduces the stack bit for bit.
+     *
+     * What is *not* exact is refused rather than approximated:
+     *
+     * - **Different kinds.** A mask and a pixel buffer are not the same kind
+     *   of thing, and there is no honest way to add one to the other.
+     * - **Wind.** A wind layer *is* its two parameters; its pixels are a cache
+     *   of them that the next composite overwrites. Merging two would keep one
+     *   pair of dials and throw the other away, and the thrown-away pair is
+     *   exactly the thing you spent time tuning.
+     * - **Different blur radii.** One radius cannot express two. (Equal radii
+     *   are fine: the merge is done on un-blurred pixels and the effect rides
+     *   along, so the composite still blurs once.)
+     * - **A path layer whose opacity differs from the one below.** Opacity
+     *   there multiplies alpha, and a path has no per-path alpha of its own —
+     *   only a strength, which moves the vector, not the coverage.
+     */
+    pub fn merge_down(&mut self, id: &str) -> bool {
+        let n = self.size;
+        let i = match self.layers.iter().position(|l| l.p.id == id) {
+            Some(i) if i > 0 => i,
+            _ => return false,
+        };
+        let kind = self.layers[i].p.kind.clone();
+        if kind != self.layers[i - 1].p.kind {
+            return false;
+        }
+        match kind {
+            LayerKind::Wind => return false,
+            LayerKind::Paint | LayerKind::Path | LayerKind::Obstacle => {}
+        }
+        let r_up = blur_amount(&self.layers[i].p.effects);
+        let r_low = blur_amount(&self.layers[i - 1].p.effects);
+        if (r_up - r_low).abs() > 0.01 {
+            return false;
+        }
+        if kind == LayerKind::Path
+            && (self.layers[i].p.opacity - self.layers[i - 1].p.opacity).abs() > 1e-4
+        {
+            return false;
+        }
+
+        let lower_id = self.layers[i - 1].p.id.clone();
+        self.save_history_stack(&[lower_id.clone(), id.to_string()]);
+
+        match kind {
+            LayerKind::Paint => {
+                let mut merged = self.layers[i - 1].buf.clone();
+                merge_over(
+                    &mut merged,
+                    &self.layers[i].buf,
+                    self.layers[i - 1].p.opacity,
+                    self.layers[i].p.opacity,
+                );
+                let lower = &mut self.layers[i - 1];
+                lower.buf = merged;
+                lower.p.opacity = 1.0;
+                lower.buf_dirty = true;
+                lower.blur_cache = None;
+            }
+            LayerKind::Obstacle => {
+                // The mask is the layer, so merging is a union of two masks —
+                // with the same over-compositing as anywhere else, so a pixel
+                // both masks cover is not double-counted.
+                let mut merged: Option<Buf> = self.layers[i - 1].mask.clone();
+                match (merged.as_mut(), self.layers[i].mask.as_ref()) {
+                    (Some(m), Some(up)) => {
+                        merge_over(m, up, self.layers[i - 1].p.opacity, self.layers[i].p.opacity)
+                    }
+                    // Only one side has a mask, so there is nothing to flatten
+                    // against — just fold its opacity into the alpha.
+                    (Some(m), None) => scale_alpha(m, self.layers[i - 1].p.opacity),
+                    (None, Some(up)) => {
+                        let mut m = up.clone();
+                        scale_alpha(&mut m, self.layers[i].p.opacity);
+                        merged = Some(m);
+                    }
+                    (None, None) => {}
+                }
+                // Two reaches acting on two different masks cannot be one
+                // reach acting on their union, so the larger wins — the same
+                // rule as two blurs, and for the same reason.
+                let d = disturbance_amount(&self.layers[i - 1].p.effects)
+                    .max(disturbance_amount(&self.layers[i].p.effects));
+                let lower = &mut self.layers[i - 1];
+                lower.mask = merged;
+                lower.p.has_mask = lower.mask.is_some();
+                lower.p.opacity = 1.0;
+                lower.p.effects = if d > 0.0 {
+                    vec![LayerEffect::disturbance(d)]
+                } else {
+                    Vec::new()
+                };
+                lower.mask_dirty = true;
+                lower.plane_cache = None;
+            }
+            LayerKind::Path => {
+                // Geometry, not pixels: the paths of both layers simply become
+                // the paths of one. Nothing is baked, so the result is still
+                // editable — which is the whole point of a path layer.
+                let mut all = self.layers[i - 1].paths.clone();
+                all.extend(self.layers[i].paths.iter().cloned());
+                let lower = &mut self.layers[i - 1];
+                lower.paths = all;
+                generate_paths(&mut lower.buf, &lower.paths);
+                lower.buf_dirty = true;
+                lower.blur_cache = None;
+            }
+            LayerKind::Wind => unreachable!(),
+        }
+
+        self.layers.remove(i);
+        self.active = lower_id;
+        // ...and the state *after*, so redo has somewhere to go.
+        let after = snapshot_of(&self.layers[i - 1]);
+        let order: Vec<String> = self.layers.iter().map(|l| l.p.id.clone()).collect();
+        self.push_history(vec![after], Some(order));
+
+        self.full_dirty = true;
+        self.invalidate_accum();
+        true
     }
 
     /// Move a layer in the visual (top-first) ordering. `from`/`to` are indices
@@ -730,20 +877,43 @@ impl Engine {
 
     pub fn save_history(&mut self) {
         let id = self.active.clone();
-        let snap = match self.layer(&id) {
-            Some(l) => vec![LayerSnapshot {
-                p: l.p.clone(),
-                buf: compress(&l.buf.data),
-                mask: l.mask.as_ref().map(|m| compress(&m.data)),
-                // Undo has to restore the paths too, or a step back would put
-                // the old pixels back under the new geometry and the two would
-                // disagree the moment you touched an anchor again.
-                paths: l.paths.clone(),
-            }],
-            None => return,
-        };
+        let Some(l) = self.layer(&id) else { return };
+        // The order comes along even though this step does not move it. Undo
+        // rewinds to *this* state, and by the time it does, a later step may
+        // have removed a layer — which only the order and the snapshot of the
+        // layer that was active here can put back.
+        let order: Vec<String> = self.layers.iter().map(|l| l.p.id.clone()).collect();
+        self.push_history(vec![snapshot_of(l)], Some(order));
+    }
+
+    /**
+     * Record the state *before* a step that changes the shape of the stack.
+     *
+     * `ids` are the layers the step is about to rewrite; the whole stack's
+     * order comes along too, because putting a removed layer back is the only
+     * way undo can mean anything here.
+     *
+     * A history entry records the state *after* the step it belongs to, so a
+     * step that removes a layer has to write two: this one, and one after the
+     * removal — otherwise undo would rewind past the merge entirely and land
+     * on whichever entry came before it, which knows nothing about the layer
+     * that got merged away.
+     */
+    fn save_history_stack(&mut self, ids: &[String]) {
+        let snaps: Vec<LayerSnapshot> = ids
+            .iter()
+            .filter_map(|id| self.layer(id).map(snapshot_of))
+            .collect();
+        if snaps.is_empty() {
+            return;
+        }
+        let order: Vec<String> = self.layers.iter().map(|l| l.p.id.clone()).collect();
+        self.push_history(snaps, Some(order));
+    }
+
+    fn push_history(&mut self, layers: Vec<LayerSnapshot>, order: Option<Vec<String>>) {
         self.history.truncate(self.hist_idx);
-        self.history.push(snap);
+        self.history.push(HistoryEntry { layers, order });
         self.hist_idx = self.history.len();
         if self.history.len() > 40 {
             self.history.remove(0);
@@ -753,23 +923,67 @@ impl Engine {
 
     fn restore(&mut self, idx: usize) {
         self.invalidate_accum();
-        let snap = match self.history.get(idx) {
-            Some(s) => s.clone(),
-            None => return,
-        };
+        let Some(entry) = self.history.get(idx).cloned() else { return };
         let expect = self.size * self.size * 4;
         let n = self.size;
-        for s in snap {
+
+        // The shape first, because a layer that is not in the stack cannot be
+        // restored into. Only attempted when every id can be accounted for —
+        // otherwise rebuilding would silently drop a layer that exists now and
+        // that this step knows nothing about.
+        let can_rebuild = entry.order.as_ref().map(|order| {
+            order.iter().all(|id| {
+                self.layers.iter().any(|l| &l.p.id == id)
+                    || entry.layers.iter().any(|s| &s.p.id == id)
+            })
+        });
+        if let (Some(order), Some(true)) = (&entry.order, can_rebuild) {
+            let mut have = std::mem::take(&mut self.layers);
+            self.layers = order
+                .iter()
+                .filter_map(|id| {
+                    match have.iter().position(|l| &l.p.id == id) {
+                        Some(i) => Some(have.remove(i)),
+                        // Removed by the step: rebuild it from the snapshot it
+                        // brought along.
+                        None => entry.layers.iter().find(|s| &s.p.id == id).map(|s| {
+                            LayerData {
+                                p: s.p.clone(),
+                                buf: Buf { w: n, h: n, data: decompress(&s.buf, expect) },
+                                mask: s.mask.as_ref().map(|m| Buf {
+                                    w: n,
+                                    h: n,
+                                    data: decompress(m, expect),
+                                }),
+                                paths: s.paths.clone(),
+                                wind_dirty: true,
+                                buf_dirty: true,
+                                mask_dirty: true,
+                                blur_cache: None,
+                                plane_cache: None,
+                            }
+                        }),
+                    }
+                })
+                .collect();
+        }
+
+        for s in &entry.layers {
             if let Some(l) = self.layer_mut(&s.p.id) {
                 l.p = s.p.clone();
                 l.buf.data = decompress(&s.buf, expect);
-                l.mask = s.mask.map(|m| Buf { w: n, h: n, data: decompress(&m, expect) });
+                l.mask = s.mask.as_ref().map(|m| Buf { w: n, h: n, data: decompress(m, expect) });
                 l.paths = s.paths.clone();
                 l.wind_dirty = true;
                 l.buf_dirty = true;
                 l.mask_dirty = true;
                 l.blur_cache = None;
                 l.plane_cache = None;
+            }
+        }
+        if !self.layers.iter().any(|l| l.p.id == self.active) {
+            if let Some(last) = self.layers.last() {
+                self.active = last.p.id.clone();
             }
         }
         self.full_dirty = true;
@@ -1014,9 +1228,33 @@ impl Engine {
                         let (lw, lh, ss) = (*lw, *lh, *ss);
                         apply_disturbance(&mut acc, plane, lw, lh, ss, x0, x1, y0, y1);
                     }
+                    // B channel: how *blocked* this pixel is, accumulated over
+                    // the masks that cover it, the same over everything else in
+                    // the stack uses.
+                    //
+                    // It used to be "last writer wins" — `B = 255 - alpha` —
+                    // which let a mask whose alpha was 2 wipe out one whose
+                    // alpha was 239 underneath it, and made two obstacle
+                    // layers impossible to merge into one without the picture
+                    // changing.
+                    //
+                    // It is done *before* the neutral blend below, because that
+                    // blend carries B = 255 (fully mobile) and would otherwise
+                    // wash the accumulated value back out.
+                    each_row_pair(&mut acc, mask, y0, y1, |drow, srow| {
+                        for x in x0..x1 {
+                            let a = srow[x * 4 + 3] as f32 / 255.0 * op;
+                            if a <= 0.0 {
+                                continue;
+                            }
+                            let blocked = 1.0 - drow[x * 4 + 2] as f32 / 255.0;
+                            let now = blocked * (1.0 - a) + a;
+                            drow[x * 4 + 2] = ((1.0 - now) * 255.0).clamp(0.0, 255.0) as u8;
+                        }
+                    });
                     fill_neutral(&mut helper, x0, x1, y0, y1);
                     mask_in(&mut helper, mask, x0, x1, y0, y1);
-                    blend_over(&mut acc, &helper, op, x0, x1, y0, y1);
+                    blend_over_rg(&mut acc, &helper, op, x0, x1, y0, y1);
                     // B channel: 255 - obstacle alpha.
                     //
                     // Written *here*, in stack order, rather than in a second
@@ -1027,10 +1265,22 @@ impl Engine {
                     // it again, exactly like any other channel.
                     each_row_pair(&mut acc, mask, y0, y1, |drow, srow| {
                         for x in x0..x1 {
-                            let a = (srow[x * 4 + 3] as f32 * op) as i32;
-                            if a > 0 {
-                                drow[x * 4 + 2] = (255 - a.min(255)) as u8;
+                            let a = srow[x * 4 + 3] as f32 / 255.0 * op;
+                            if a <= 0.0 {
+                                continue;
                             }
+                            // How *blocked* this pixel already is, composited
+                            // with this mask over it — the same over the rest
+                            // of the stack uses, rather than "last writer
+                            // wins".
+                            //
+                            // Last-writer-wins meant a mask whose alpha was 2
+                            // wiped out one whose alpha was 239 underneath,
+                            // and it also made two obstacle layers impossible
+                            // to merge into one without changing the picture.
+                            let blocked = 1.0 - drow[x * 4 + 2] as f32 / 255.0;
+                            let now = blocked * (1.0 - a) + a;
+                            drow[x * 4 + 2] = ((1.0 - now) * 255.0).clamp(0.0, 255.0) as u8;
                         }
                     });
                 }
@@ -1227,12 +1477,88 @@ fn blend_over(dst: &mut Buf, src: &Buf, opacity: f32, x0: usize, x1: usize, y0: 
     });
 }
 
+/**
+ * `blend_over` for a layer that owns its B channel elsewhere.
+ *
+ * An obstacle mask carries a neutral pixel whose B is 255 — "fully mobile" —
+ * which is the opposite of what the mask means. So the mask's contribution to
+ * B is written separately (see the obstacle branch of `composite`) and this
+ * blend leaves B alone.
+ */
+fn blend_over_rg(dst: &mut Buf, src: &Buf, opacity: f32, x0: usize, x1: usize, y0: usize, y1: usize) {
+    each_row_pair(dst, src, y0, y1, |d, s| {
+        for x in x0..x1 {
+            let i = x * 4;
+            let sa = s[i + 3] as f32 / 255.0 * opacity;
+            if sa <= 0.0 {
+                continue;
+            }
+            let inv = 1.0 - sa;
+            d[i] = (s[i] as f32 * sa + d[i] as f32 * inv) as u8;
+            d[i + 1] = (s[i + 1] as f32 * sa + d[i + 1] as f32 * inv) as u8;
+            d[i + 3] = (sa * 255.0 + d[i + 3] as f32 * inv).min(255.0) as u8;
+        }
+    });
+}
+
 /// destination-in: keep src RGB but multiply alpha by the mask
 fn mask_in(dst: &mut Buf, mask: &Buf, x0: usize, x1: usize, y0: usize, y1: usize) {
     each_row_pair(dst, mask, y0, y1, |d, m| {
         for x in x0..x1 {
             let i = x * 4;
             d[i + 3] = ((d[i + 3] as f32) * (m[i + 3] as f32 / 255.0)) as u8;
+        }
+    });
+}
+
+/**
+ * Flatten `src` over `dst` into one buffer at full opacity, both layers'
+ * opacities folded in.
+ *
+ * **Not** `blend_over`. That one is written for the composite, where the
+ * destination is the running accumulation and is therefore always opaque — so
+ * it can skip multiplying the destination's colour by its alpha. Here the
+ * destination is an ordinary layer whose alpha is whatever was painted, and
+ * skipping that factor would leave the lower layer's colour at full strength
+ * under a half-covered pixel.
+ *
+ * Doing it in premultiplied space and dividing through by the resulting alpha
+ * is what makes the result *exactly* what the two layers produced, rather than
+ * an approximation of it: `over` is associative, and opacity only ever enters
+ * as `alpha * opacity`.
+ */
+fn merge_over(dst: &mut Buf, src: &Buf, dst_op: f32, src_op: f32) {
+    each_row_pair(dst, src, 0, dst.h, |d, s| {
+        for px in 0..(d.len() / 4) {
+            let i = px * 4;
+            let ad = d[i + 3] as f32 / 255.0 * dst_op;
+            let as_ = s[i + 3] as f32 / 255.0 * src_op;
+            let ao = as_ + ad * (1.0 - as_);
+            if ao <= 0.0 {
+                d[i + 3] = 0;
+                continue;
+            }
+            for c in 0..3 {
+                let v = s[i + c] as f32 * as_ + d[i + c] as f32 * ad * (1.0 - as_);
+                d[i + c] = (v / ao).clamp(0.0, 255.0) as u8;
+            }
+            d[i + 3] = (ao * 255.0).min(255.0) as u8;
+        }
+    });
+}
+
+/// Multiply every alpha by `f`, leaving the colour alone.
+///
+/// This is what folds a layer's opacity into its pixels, and it is why a merge
+/// can be exact: `blend_over` only ever reads `alpha * opacity`, so scaling the
+/// alpha by the opacity and then dropping the opacity changes nothing.
+fn scale_alpha(b: &mut Buf, f: f32) {
+    if (f - 1.0).abs() < 1e-4 {
+        return;
+    }
+    each_row_mut(b, 0, b.h, |row| {
+        for px in row.chunks_exact_mut(4) {
+            px[3] = (px[3] as f32 * f) as u8;
         }
     });
 }
@@ -1251,6 +1577,18 @@ fn copy_rect(dst: &mut Buf, src: &Buf, x0: usize, x1: usize, y0: usize, y1: usiz
     each_row_pair(dst, src, y0, y1, |d, s| {
         d[x0 * 4..x1 * 4].copy_from_slice(&s[x0 * 4..x1 * 4]);
     });
+}
+
+fn snapshot_of(l: &LayerData) -> LayerSnapshot {
+    LayerSnapshot {
+        p: l.p.clone(),
+        buf: compress(&l.buf.data),
+        mask: l.mask.as_ref().map(|m| compress(&m.data)),
+        // Undo has to restore the paths too, or a step back would put the old
+        // pixels back under the new geometry and the two would disagree the
+        // moment you touched an anchor again.
+        paths: l.paths.clone(),
+    }
 }
 
 fn compress(data: &[u8]) -> Vec<u8> {

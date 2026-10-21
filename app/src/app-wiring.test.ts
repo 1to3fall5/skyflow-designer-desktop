@@ -21,6 +21,13 @@ import rawIcons from './icons?raw';
 import rawFlowWarp from './flowWarp?raw';
 import rawArrows from './arrows?raw';
 import rawFlowShader from './components/FlowShader?raw';
+import rawMerge from './merge?raw';
+// The engine is Rust, so its half of the rule is read straight off disk —
+// see `readSrc` below for how the others get theirs.
+const rawEngine = readFileSync(
+  new URL('../src-tauri/src/engine/mod.rs', import.meta.url),
+  'utf8',
+);
 // Vite's CSS plugin turns `styles.css?raw` into an empty string, so read
 // the source straight off disk. Everything else here uses `?raw`.
 import { readFileSync } from 'node:fs';
@@ -1759,5 +1766,53 @@ describe("tool icons", () => {
   it('attributes Lucide, since the icons are not ours', () => {
     expect(icons).toContain('lucide-icons/lucide');
     expect(icons).toContain('ISC');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+/**
+ * 向下合并.
+ *
+ * Merging is the one operation that *destroys* something — a layer stops
+ * existing. So the rules are not decoration: what it refuses is exactly what
+ * it cannot do without the picture changing.
+ */
+describe('向下合并: two layers become one, the picture must not move', () => {
+  const i = src.indexOf('    layers: (');
+  const layersPanel = src.slice(i, src.indexOf('\n    view:', i));
+
+  it('is a button in the layer strip, next to reorder', () => {
+    // Not in a menu: it is an operation on the row you are looking at, and
+    // PS puts it in the same place.
+    expect(layersPanel).toMatch(/<IconBtn icon="merge"/);
+    expect(layersPanel).toMatch(/onClick=\{\(\) => activeLayer && structural\(api\.mergeDown\(activeLayer\.id\)\)\}/);
+  });
+
+  it('is greyed out with the reason, never silently inert', () => {
+    // A disabled button that says nothing is indistinguishable from a broken
+    // one. The reason comes from the same rule the engine enforces.
+    expect(layersPanel).toMatch(/disabled=\{mergeBlocker\(layers, state\?\.active \?\? null\) !== null\}/);
+    expect(layersPanel).toMatch(/title=\{mergeTitle\(layers, state\?\.active \?\? null\)\}/);
+    // ...so the rule has to live somewhere testable, not inline in the JSX.
+    expect(rawMerge).toMatch(/export function mergeBlocker\(rows: LayerInfo\[\], activeId: string \| null\)/);
+    expect(rawMerge).toMatch(/只有同类型的图层才能合并/);
+    expect(rawMerge).toMatch(/风向层是它的两个旋钮本身/);
+  });
+
+  it('asks the same rule before it takes the Ctrl+E shortcut', () => {
+    // The key and the button must agree. If the key called mergeDown blindly,
+    // Ctrl+E would look broken exactly when the button is greyed out.
+    expect(src).toMatch(/case 'merge': \{/);
+    expect(src).toMatch(/if \(activeLayer && !mergeBlocker\(layers, activeLayer\.id\)\)/);
+    expect(src).toMatch(/structural\(api\.mergeDown\(activeLayer\.id\)\)/);
+  });
+
+  it('keeps the merged step undoable, which means the stack has to go in history', () => {
+    // Undo used to only ever restore *one* layer's pixels — enough for a brush
+    // stroke, not enough for a step that deletes a layer. The engine writes
+    // both sides of a structural step for that reason.
+    expect(rawEngine).toMatch(/fn save_history_stack\(&mut self, ids: &\[String\]\)/);
+    expect(rawEngine).toMatch(/order: Option<Vec<String>>/);
   });
 });

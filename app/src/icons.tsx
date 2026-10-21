@@ -116,6 +116,10 @@ const PATHS: Record<string, string[]> = {
   // Delete one effect. Deliberately a plain cross and not a bin: a bin means
   // "throw the whole thing away", and this only removes one row from a list.
   x: ['M6 6l12 12', 'M18 6L6 18'],
+  // 向下合并: two plates with an arrow dropping from the upper into the lower.
+  // The arrow is the whole message — up / down arrows alone would read as
+  // "reorder", which is the button right next to this one.
+  merge: ['M3 4h18v4H3z', 'M3 16h18v4H3z', 'M12 9v6', 'm9.5 12.5 2.5 3 2.5-3'],
 };
 
 export type IconName = keyof typeof PATHS;

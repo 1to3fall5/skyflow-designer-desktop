@@ -429,6 +429,14 @@ pub fn reorder(from: usize, to: usize, state: State<AppState>) -> Snapshot {
     emit(&state)
 }
 
+/// Merge a layer into the one below it. Refuses rather than approximating —
+/// see `Engine::merge_down` for what it will not do.
+#[tauri::command]
+pub fn merge_down(id: String, state: State<AppState>) -> Snapshot {
+    state.engine.lock().unwrap().merge_down(&id);
+    emit(&state)
+}
+
 #[tauri::command]
 pub fn set_active(id: String, state: State<AppState>) -> StateResp {
     state.engine.lock().unwrap().active = id;

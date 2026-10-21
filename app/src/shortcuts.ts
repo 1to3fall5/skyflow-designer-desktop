@@ -40,6 +40,8 @@ export type Action =
   | { type: 'resetView' }
   | { type: 'undo' }
   | { type: 'redo' }
+  /** Ctrl+E: merge the selected layer into the one below it. */
+  | { type: 'merge' }
   | { type: 'file'; op: 'new' | 'open' | 'save' | 'saveAs' | 'export' }
   | { type: 'brushSize'; delta: number }
   /** F / Ctrl+F held: enter drag-to-adjust mode for a brush parameter. */
@@ -92,7 +94,12 @@ export function resolveShortcut(e: KeyEventLike): Action {
       case 'n': return { type: 'file', op: 'new' };
       case 'o': return { type: 'file', op: 'open' };
       case 's': return { type: 'file', op: e.shift ? 'saveAs' : 'save' };
-      case 'e': return { type: 'file', op: 'export' };
+      // Ctrl+E is Photoshop's 向下合并. Export gives up the key and moves to
+      // Ctrl+Shift+E: muscle memory for merge-down is older and stronger than
+      // muscle memory for an export dialog.
+      case 'e': return e.shift
+        ? { type: 'file', op: 'export' }
+        : { type: 'merge' };
       case 'z': return e.shift ? { type: 'redo' } : { type: 'undo' };
       case 'y': return { type: 'redo' };
       case 'f': return { type: 'brushAdjust', param: 'strength' };
@@ -229,7 +236,8 @@ export const SHORTCUT_HELP: Array<[string, string]> = [
   ['重做', 'Ctrl+Y'],
   ['新建 / 打开', 'Ctrl+N / Ctrl+O'],
   ['保存 / 另存为', 'Ctrl+S / Ctrl+Shift+S'],
-  ['导出贴图', 'Ctrl+E'],
+  ['向下合并图层', 'Ctrl+E'],
+  ['导出贴图', 'Ctrl+Shift+E'],
   ['关闭帮助', 'Esc'],
   ['显示/隐藏本面板', '?'],
   // --- mouse ---

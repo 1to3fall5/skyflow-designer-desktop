@@ -36,6 +36,7 @@ pub fn run() {
             commands::set_effects,
             commands::remove_layer,
             commands::reorder,
+            commands::merge_down,
             commands::set_active,
             commands::clear_layer,
             commands::set_projection,

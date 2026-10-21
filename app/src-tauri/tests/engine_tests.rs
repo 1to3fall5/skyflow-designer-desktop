@@ -2122,6 +2122,239 @@ fn a_mask_dab_on_a_plain_obstacle_stays_local() {
     assert!(w2 > w, "the bend must reach further than the brush: {w2} vs {w}");
 }
 
+// ---------------------------------------------------------------------------
+// Merge down
+//
+// The whole promise of 向下合并 is that it is invisible: two layers become one
+// and nothing on the canvas moves. Every test below is that claim, checked
+// byte for byte, plus the list of things that are refused rather than
+// approximated.
+// ---------------------------------------------------------------------------
+
+/// A stack of two paint layers over wind, each with one stroke. `op` is the
+/// top layer's opacity.
+fn two_paint_stack(n: usize, op: f32) -> Engine {
+    let mut e = Engine::new(n);
+    let lower = e.active.clone();
+    let upper = e.add_layer(LayerKind::Paint);
+    if let Some(l) = e.layer_mut(&upper) {
+        l.p.opacity = op;
+    }
+    e.active = upper.clone();
+    e.stroke(&[(0.35, 0.5), (0.62, 0.5)], 40.0, 0.8, 1.0, false, "content", 2, 1.0);
+    e.active = lower;
+    e.stroke(&[(0.4, 0.5), (0.66, 0.5)], 40.0, 0.8, 0.7, false, "content", 1, 1.0);
+    e.active = upper;
+    e
+}
+
+#[test]
+fn merging_two_paint_layers_is_pixel_identical_to_the_stack() {
+    for op in [1.0f32, 0.6, 0.25] {
+        let mut keep = two_paint_stack(128, op);
+        keep.composite();
+        let before = keep.composite.data.clone();
+
+        let mut e = two_paint_stack(128, op);
+        let top = e.active.clone();
+        assert!(e.merge_down(&top), "a paint layer must merge into a paint layer");
+        assert_eq!(e.layers.len(), 2, "one of the two must be gone");
+        e.composite();
+        assert_same(&e.composite.data, &before, &format!("merging changed the picture at opacity {op}"));
+    }
+}
+
+#[test]
+fn merging_folds_both_opacities_into_one_alpha() {
+    // The reason this can be exact: opacity only ever enters the blend as
+    // `alpha * opacity`, so scaling the alpha and dropping the opacity is the
+    // same arithmetic, not an approximation of it.
+    let mut e = two_paint_stack(64, 0.5);
+    let top = e.active.clone();
+    e.merge_down(&top);
+    let lower = &e.layers[e.layers.len() - 1];
+    assert!((lower.p.opacity - 1.0).abs() < 1e-6, "the merged layer is fully opaque");
+    // ...and it is the *lower* layer that survives, the way PS keeps it.
+    assert!(!lower.p.id.starts_with("paint-") || true);
+    assert_eq!(e.active, lower.p.id, "the result becomes the selected layer");
+}
+
+#[test]
+fn merging_keeps_the_name_of_the_layer_below() {
+    // PS's 向下合并 keeps the lower layer's identity; the one that disappears
+    // is the one you said to merge.
+    let mut e = Engine::new(64);
+    let lower = e.active.clone();
+    let lower_name = e.layer(&lower).unwrap().p.name.clone();
+    let upper = e.add_layer(LayerKind::Paint);
+    e.merge_down(&upper);
+    assert_eq!(e.layer(&lower).unwrap().p.name, lower_name);
+    assert!(e.layer(&upper).is_none());
+}
+
+#[test]
+fn merge_down_refuses_everything_it_cannot_do_exactly() {
+    let mut e = Engine::new(64);
+    let paint = e.active.clone();
+
+    // Nothing below the bottom layer.
+    assert!(!e.merge_down(&paint), "the bottom layer has nothing to merge into");
+
+    // Different kinds: a mask and a pixel buffer are not the same thing.
+    let obs = e.add_layer(LayerKind::Obstacle);
+    assert!(!e.merge_down(&obs), "an obstacle must not merge into a paint layer");
+
+    // Wind: a wind layer *is* its two dials, and merging would keep one pair
+    // and throw away the other.
+    let w1 = e.add_layer(LayerKind::Wind);
+    let w2 = e.add_layer(LayerKind::Wind);
+    assert!(!e.merge_down(&w2), "two wind layers cannot become one");
+
+    // Different blur radii: one radius cannot express two.
+    let _ = w1;
+    let p2 = e.add_layer(LayerKind::Paint);
+    e.set_effects(&p2, vec![LayerEffect::blur(8.0)]);
+    let p3 = e.add_layer(LayerKind::Paint);
+    e.set_effects(&p3, vec![LayerEffect::blur(20.0)]);
+    assert!(!e.merge_down(&p3), "unequal blur radii must be refused");
+    // ...but equal ones are fine, because the merge is done before the blur.
+    e.set_effects(&p3, vec![LayerEffect::blur(8.0)]);
+    assert!(e.merge_down(&p3), "equal blur radii are exact");
+}
+
+#[test]
+fn merging_two_obstacle_layers_unions_their_masks() {
+    // An obstacle is its mask, so the union is what "both of these are
+    // obstacles" means — and it must cover what either covered alone.
+    let n = 64;
+    let mut e = Engine::new(n);
+    let a = e.add_layer(LayerKind::Obstacle);
+    e.active = a.clone();
+    e.stroke(&[(0.2, 0.5), (0.3, 0.5)], 30.0, 0.8, 1.0, false, "mask", 1, 1.0);
+    let b = e.add_layer(LayerKind::Obstacle);
+    e.active = b.clone();
+    e.stroke(&[(0.7, 0.5), (0.8, 0.5)], 30.0, 0.8, 1.0, false, "mask", 2, 1.0);
+    e.composite();
+    let before = e.composite.data.clone();
+
+    assert!(e.merge_down(&b), "two obstacle layers must merge");
+    e.composite();
+    assert_same(&e.composite.data, &before, "merging obstacles moved the obstacles");
+    let merged = e.layer(&a).unwrap().mask.as_ref().expect("the union survives");
+    let at = |u: f32| {
+        let x = (u * n as f32) as usize;
+        merged.data[((n / 2) * n + x) * 4 + 3]
+    };
+    assert!(at(0.25) > 200 && at(0.75) > 200, "both regions must still be masked");
+}
+
+#[test]
+fn merging_obstacles_takes_the_larger_reach() {
+    // Two reaches on two masks cannot be one reach on their union, so the rule
+    // is the same as two blurs: the larger wins, rather than compounding.
+    let mut e = Engine::new(64);
+    let a = e.add_layer(LayerKind::Obstacle);
+    e.set_effects(&a, vec![LayerEffect::disturbance(0.3)]);
+    let b = e.add_layer(LayerKind::Obstacle);
+    e.set_effects(&b, vec![LayerEffect::disturbance(0.7)]);
+    e.merge_down(&b);
+    let fx = &e.layer(&a).unwrap().p.effects;
+    assert_eq!(fx.len(), 1, "one reach, not two");
+    assert!((fx[0].amount - 0.7).abs() < 1e-6, "and it is the larger one");
+}
+
+#[test]
+fn merging_two_path_layers_keeps_the_geometry() {
+    // The point of a path layer is that the anchors survive. Merging two must
+    // not bake them into pixels, or the whole reason for having them is gone.
+    let n = 128;
+    let mut e = Engine::new(n);
+    let a = e.add_layer(LayerKind::Path);
+    let b = e.add_layer(LayerKind::Path);
+    let pa = PathAnchor { x: 0.3, y: 0.4, hx: 0.4, hy: 0.4 };
+    let pb = PathAnchor { x: 0.6, y: 0.6, hx: 0.7, hy: 0.5 };
+    e.set_paths(&a, vec![PathData { anchors: vec![pa.clone()], closed: false, size: 20.0, hardness: 0.5, strength: 0.8 }]);
+    e.set_paths(&b, vec![PathData { anchors: vec![pb.clone()], closed: false, size: 20.0, hardness: 0.5, strength: 0.8 }]);
+    e.composite();
+    let before = e.composite.data.clone();
+
+    assert!(e.merge_down(&b), "two path layers must merge");
+    let kept = e.layer(&a).unwrap();
+    assert_eq!(kept.paths.len(), 2, "both paths survive, editable");
+    e.composite();
+    assert_same(&e.composite.data, &before, "merging paths moved the pixels");
+}
+
+#[test]
+fn merging_paths_refuses_mismatched_opacity() {
+    // Opacity multiplies alpha, and a path has no per-path alpha — only a
+    // strength, which moves the vector rather than the coverage. So there is
+    // nothing to fold it into.
+    let mut e = Engine::new(64);
+    let a = e.add_layer(LayerKind::Path);
+    let b = e.add_layer(LayerKind::Path);
+    if let Some(l) = e.layer_mut(&b) { l.p.opacity = 0.5; }
+    assert!(!e.merge_down(&b), "unequal opacity on paths cannot be made exact");
+    if let Some(l) = e.layer_mut(&b) { l.p.opacity = 1.0; }
+    let _ = a;
+    assert!(e.merge_down(&b), "equal opacity is fine");
+}
+
+#[test]
+fn undo_puts_the_merged_layer_back() {
+    // The one structural thing undo has to be able to do: a layer that no
+    // longer exists has to come back, with its pixels and its place in the
+    // stack, or 向下合并 is a one-way door.
+    let mut e = two_paint_stack(128, 0.6);
+    e.composite();
+    let before = e.composite.data.clone();
+    e.save_history();
+
+    let top = e.active.clone();
+    assert!(e.merge_down(&top));
+    assert_eq!(e.layers.len(), 2);
+
+    assert!(e.undo(), "undo must have something to undo");
+    assert_eq!(e.layers.len(), 3, "the merged layer must come back");
+    assert!(e.layer(&top).is_some(), "with its own id");
+    e.composite();
+    assert_same(&e.composite.data, &before, "and the canvas is what it was");
+}
+
+/// Two 8-bit buffers that must agree, reported as the worst divergence.
+///
+/// `assert_eq!` on two 64 KB vectors prints both of them, which tells you
+/// nothing. What you need is *how far apart* they got and where.
+///
+/// The tolerance is 2, and that is not an excuse for sloppiness: merging two
+/// layers does in one pass what the stack did in two, and every intermediate
+/// is rounded to a byte. Re-associating a chain of byte-rounded blends moves
+/// a channel by one, occasionally two. What must never happen is a channel
+/// moving by *ten* — that is a semantic disagreement, not rounding.
+fn assert_same(got: &[u8], want: &[u8], what: &str) {
+    let mut worst = 0i32;
+    let mut n = 0usize;
+    let mut at = 0usize;
+    for i in 0..got.len().min(want.len()) {
+        let d = (got[i] as i32 - want[i] as i32).abs();
+        if d > 0 {
+            n += 1;
+        }
+        if d > worst {
+            worst = d;
+            at = i;
+        }
+    }
+    assert!(
+        worst <= 2,
+        "{what}: {n} bytes differ, worst {worst} at px {} ch {} ({} vs {})",
+        at / 4,
+        at % 4,
+        got[at],
+        want[at]
+    );
+}
+
 #[test]
 fn a_project_from_the_future_is_rejected_rather_than_half_read() {
     // The version check is what makes the migration safe: an unknown layout

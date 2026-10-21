@@ -16,6 +16,7 @@ import PaintView, { PaintViewHandle, type PenInfo } from './components/PaintView
 import Preview3D, { Preview3DHandle } from './components/Preview3D';
 import { ToolIcon } from './icons';
 import AppBar from './AppBar';
+import { mergeBlocker, mergeTitle } from './merge';
 import type { MenuCmd } from './menu';
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
@@ -687,6 +688,15 @@ export default function App() {
           break;
         case 'undo': structural(api.undo()); break;
         case 'redo': structural(api.redo()); break;
+        case 'merge': {
+          // The engine refuses what it cannot do exactly, and the button is
+          // already grey in those cases; the key has to agree with it or the
+          // shortcut looks broken.
+          if (activeLayer && !mergeBlocker(layers, activeLayer.id)) {
+            structural(api.mergeDown(activeLayer.id));
+          }
+          break;
+        }
         case 'brushSize': setBrushSize((s) => clamp(s + action.delta, 1, 200)); break;
         case 'opacity': {
           // Photoshop's number keys: `4` is 40%, `4` `5` is 45%, `0` is 100%.
@@ -1038,6 +1048,13 @@ export default function App() {
               something you hang on it, so it gets an action rather than a
               slider. What it adds depends on the kind — see
               `ADDABLE_BY_KIND`. */}
+          {/* 向下合并, next to the reorder buttons it is most likely to be
+              confused with — hence the arrow-into-a-plate glyph rather than
+              another chevron. */}
+          <IconBtn icon="merge"
+            title={mergeTitle(layers, state?.active ?? null)}
+            disabled={mergeBlocker(layers, state?.active ?? null) !== null}
+            onClick={() => activeLayer && structural(api.mergeDown(activeLayer.id))} />
           <IconBtn icon="fx"
             title={nextFx
               ? `添加图层效果：${FX_META[nextFx].label}`
