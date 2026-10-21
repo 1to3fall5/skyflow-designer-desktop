@@ -381,7 +381,6 @@ impl Engine {
      *   only a strength, which moves the vector, not the coverage.
      */
     pub fn merge_down(&mut self, id: &str) -> bool {
-        let n = self.size;
         let i = match self.layers.iter().position(|l| l.p.id == id) {
             Some(i) if i > 0 => i,
             _ => return false,
