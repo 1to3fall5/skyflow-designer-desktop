@@ -2473,3 +2473,77 @@ fn erasing_a_mask_moves_the_composite_back() {
         "erasing it must let the pixel flow again"
     );
 }
+
+#[test]
+fn erasing_a_mask_respects_the_opacity() {
+    // The bug: `flow` was pinned to 1.0 for masks, so the eraser always took a
+    // pixel all the way to zero however low the slider was. At 25% one stroke
+    // may only take a quarter of the way there.
+    let n = 64;
+    let mut e = Engine::new(n);
+    let id = e.add_layer(LayerKind::Obstacle);
+    e.active = id.clone();
+    e.stroke(&[(0.5, 0.5)], 30.0, 1.0, 1.0, false, "mask", 1, 1.0);
+    let painted = mask_at(&e, &id, n, n / 2, n / 2);
+    assert!(painted > 250, "the dab should be at full coverage: {painted}");
+
+    e.stroke(&[(0.5, 0.5)], 30.0, 1.0, 1.0, true, "mask", 2, 0.25);
+    let after = mask_at(&e, &id, n, n / 2, n / 2);
+    assert!(
+        (170..=215).contains(&after),
+        "25% should leave about three quarters: {painted} -> {after}"
+    );
+}
+
+#[test]
+fn a_low_opacity_eraser_still_finishes() {
+    // Opacity is the size of one step, not a ceiling: enough strokes have to
+    // reach zero. Round-to-nearest quantisation would let each of the last few
+    // steps round back to where it started and stick there forever, which reads
+    // as "the eraser does not work".
+    let n = 64;
+    let mut e = Engine::new(n);
+    let id = e.add_layer(LayerKind::Obstacle);
+    e.active = id.clone();
+    e.stroke(&[(0.5, 0.5)], 30.0, 1.0, 1.0, false, "mask", 1, 1.0);
+    for sid in 2..80u64 {
+        e.stroke(&[(0.5, 0.5)], 30.0, 1.0, 1.0, true, "mask", sid, 0.15);
+    }
+    assert_eq!(mask_at(&e, &id, n, n / 2, n / 2), 0, "15% gets there eventually");
+}
+
+#[test]
+fn painting_a_mask_respects_the_opacity_and_builds_up() {
+    // Same in the other direction, and the asymmetry that would otherwise
+    // appear: erasing respects the slider while painting caps at it. A second
+    // stroke has to land more than the first.
+    let n = 64;
+    let mut e = Engine::new(n);
+    let id = e.add_layer(LayerKind::Obstacle);
+    e.active = id.clone();
+    e.stroke(&[(0.5, 0.5)], 30.0, 1.0, 1.0, false, "mask", 1, 0.3);
+    let one = mask_at(&e, &id, n, n / 2, n / 2);
+    assert!((60..=95).contains(&one), "30% of the way to full: {one}");
+
+    e.stroke(&[(0.5, 0.5)], 30.0, 1.0, 1.0, false, "mask", 2, 0.3);
+    let two = mask_at(&e, &id, n, n / 2, n / 2);
+    assert!(two > one + 30, "a second stroke must build up: {one} -> {two}");
+    assert!(two < 255, "and must not arrive in two: {two}");
+}
+
+#[test]
+fn the_obstacle_thumbnail_follows_coverage() {
+    // The thumbnail is the only place a mask is looked at by a human. It read a
+    // colour channel, which the stamp wrote as flat white — so a half-erased
+    // area was shown exactly as solid as a fresh one.
+    let n = 64;
+    let mut e = Engine::new(n);
+    let id = e.add_layer(LayerKind::Obstacle);
+    e.active = id.clone();
+    e.stroke(&[(0.5, 0.5)], 30.0, 1.0, 1.0, false, "mask", 1, 0.3);
+    let l = e.layer(&id).unwrap();
+    let t = e.layer_thumb(l, 16, 16);
+    let alpha = t.data[(8 * 16 + 8) * 4 + 3];
+    assert!(alpha < 140, "a 30% dab must not be shown as solid: {alpha}");
+    assert!(alpha > 20, "and not as empty either: {alpha}");
+}

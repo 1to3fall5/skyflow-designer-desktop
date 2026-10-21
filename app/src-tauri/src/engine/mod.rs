@@ -286,16 +286,20 @@ impl Engine {
         let Some(m) = l.mask.as_ref() else {
             return Buf::new(tw, th);
         };
-        // Recolour first, shrink second: the mask is greyscale, and a grey
-        // thumbnail on a grey panel is unreadable. Averaging the recoloured
-        // buffer is also what gives the shape a soft edge instead of a
-        // point-sampled dotted one.
+        // Recolour first, shrink second: the mask is a single channel, and a
+        // grey thumbnail on a grey panel is unreadable. Averaging the
+        // recoloured buffer is also what gives the shape a soft edge instead of
+        // a point-sampled dotted one.
+        //
+        // The channel read is the **alpha** — that is the mask. Reading a
+        // colour channel instead turned every painted pixel into a flat 255,
+        // so a half-erased area looked exactly as solid as a fresh one.
         let mut plate = Buf::new(m.w, m.h);
         for (o, i) in plate.data.chunks_exact_mut(4).zip(m.data.chunks_exact(4)) {
             o[0] = 226;
             o[1] = 232;
             o[2] = 240;
-            o[3] = i[0];
+            o[3] = i[3];
         }
         ops::downscale(&plate, tw, th)
     }
@@ -533,19 +537,17 @@ impl Engine {
 
         let n = self.size;
 
-        // Deposit bookkeeping for the current stroke. Only flow layers build
-        // up; a mask's alpha is its payload and has nothing to accumulate
-        // towards — *except* while erasing, where this records how far the
-        // stroke has already taken each pixel, so that going over a spot again
-        // erases more while sampling the same spot twice within one stroke does
-        // not.
+        // Deposit bookkeeping for the current stroke: one byte per pixel, the
+        // most this stroke has already delivered here. It is what keeps a
+        // stroke idempotent however densely the pointer was sampled, while
+        // letting a *second* stroke do more — and that is as true of a mask,
+        // whose alpha is pushed towards painted or bare, as it is of a flow
+        // layer's coverage.
         //
         // Moved out of `self` for the duration of the loop — the layer buffer
         // below is borrowed from `self` too, and they are different fields.
         let key = Some((active_id.clone(), stroke_id));
-        let mut accum_opt: Option<Vec<u8>> = if is_adj && !erase {
-            None
-        } else {
+        let mut accum_opt = {
             let mut a = std::mem::take(&mut self.stroke_accum);
             if a.len() != n * n {
                 a = vec![0u8; n * n];
@@ -617,7 +619,13 @@ impl Engine {
                     continue;
                 }
                 let st = if is_mask {
-                    StampStyle { r: 255, g: 255, b: 255, erase, opaque: true, flow: 1.0 }
+                    // `flow` is the brush's opacity, and a mask honours it like
+                    // any other payload: how much of the way to "painted" (or
+                    // to "bare", when erasing) one stroke is allowed to go.
+                    //
+                    // It used to be pinned to 1.0 here, which made the opacity
+                    // slider a no-op on wind and obstacle layers.
+                    StampStyle { r: 255, g: 255, b: 255, erase, opaque: true, flow }
                 } else {
                     let vx = dx / d;
                     let vy = dy / d;
