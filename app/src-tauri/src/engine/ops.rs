@@ -307,7 +307,11 @@ pub struct StampStyle {
 ///   * light grazing       -> barely disturbs what is there
 /// ...and is smooth in both inputs, which is the point.
 #[inline]
-fn write_union(d4: &mut [u8], a: f32, style: &StampStyle) {
+fn write_union(d4: &mut [u8], a: f32, style: &StampStyle, erase_acc: Option<&mut u8>) {
+    if style.erase {
+        erase_union(d4, a, erase_acc);
+        return;
+    }
     let prev_a = d4[3] as f32 / 255.0;
     let w_new = a;
     let w_old = prev_a * (1.0 - a);
@@ -324,6 +328,50 @@ fn write_union(d4: &mut [u8], a: f32, style: &StampStyle) {
         }
     }
     d4[3] = (a.max(prev_a) * 255.0) as u8;
+}
+
+/// What the eraser does to a mask.
+///
+/// Two things have to be true at once, and they pull in opposite directions:
+///
+/// * **Within one stroke, idempotent.** A stroke is a dense row of stamps, so
+///   how many of them land on a pixel is a function of pointer sampling rate,
+///   not of what the user drew. Counting them would scrub the middle of a slow
+///   drag bare while leaving its edges barely touched.
+/// * **Across strokes, cumulative.** Going over a spot again has to erase more,
+///   or a soft eraser could never finish the job.
+///
+/// So the stroke's *own* progress is kept in `erase_acc` — the largest coverage
+/// this stroke has reached here — and the pixel is moved to
+/// `before * (1 - largest) / (1 - previous largest)`, which needs no memory of
+/// what the pixel started at because the two ratios cancel. One stroke sweeps
+/// a pixel once no matter how densely it is sampled; the next stroke starts
+/// from zero and takes it down again.
+///
+/// A plain `prev * (1 - a)` is the obvious decay and the wrong one: it compounds
+/// inside a single stroke. A plain `min(prev, 1 - a)` is idempotent but sticks
+/// — after one pass the pixel sits exactly at `1 - a` and no later stroke can
+/// move it.
+///
+/// RGB is left alone, exactly as canvas `destination-out` does it.
+#[inline]
+fn erase_union(d4: &mut [u8], a: f32, acc: Option<&mut u8>) {
+    let prev = d4[3] as f32;
+    let Some(slot) = acc else {
+        // No per-stroke state: the caller cannot keep this idempotent, so take
+        // the plain decay rather than pretending otherwise.
+        d4[3] = (prev * (1.0 - a).max(0.0)) as u8;
+        return;
+    };
+    let e_prev = *slot as f32 / 255.0;
+    let e = a.max(e_prev);
+    *slot = (e * 255.0).min(255.0) as u8;
+    let next = if e_prev >= 1.0 {
+        0.0
+    } else {
+        prev * (1.0 - e) / (1.0 - e_prev)
+    };
+    d4[3] = next.clamp(0.0, 255.0) as u8;
 }
 
 /// Plateau radius as a fraction of the brush radius, for a hardness of 0 and 1.
@@ -451,8 +499,15 @@ pub fn stamp(
             if style.opaque {
                 // ---- mask payload -----------------------------------------
                 // Coverage *is* the content, so there is nothing to build up
-                // towards; fall through to the plain union write below.
-                write_union(d4, a, style);
+                // towards; fall through to the plain union write below, which
+                // erases when the style says to.
+                //
+                // The eraser used to fall through to the *union* write here —
+                // which is a `max`, i.e. paint-only — so erasing an obstacle
+                // mask painted it instead. The union path has no erase case of
+                // its own because it never needed one: this is the branch that
+                // handles masks.
+                write_union(d4, a, style, accum.as_deref_mut().map(|acc| &mut acc[aidx]));
             } else if let Some(acc) = accum.as_deref_mut() {
                 // ---- flow deposit (Photoshop-style) ------------------------
                 let w_new = (style.flow * a).clamp(0.0, 1.0);
@@ -484,7 +539,7 @@ pub fn stamp(
                         // *composite*: `alpha * mine + (1-alpha) * wind`. The
                         // vector rotates from the wind towards the stroke as
                         // coverage builds, which is the whole point.
-                        write_union(d4, a, style);
+                        write_union(d4, a, style, None);
                     }
                     d4[3] = (tgt_a + (prev_a as f32 - tgt_a) * back + 0.5) as u8;
                     acc[aidx] = (w_new * 255.0 + 0.5) as u8;
@@ -495,7 +550,7 @@ pub fn stamp(
                 let inv = 1.0 - a;
                 d4[3] = (d4[3] as f32 * inv) as u8;
             } else {
-                write_union(d4, a, style);
+                write_union(d4, a, style, None);
             }
             if px < min_x { min_x = px; }
             if px > max_x { max_x = px; }

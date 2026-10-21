@@ -536,12 +536,15 @@ impl Engine {
 
         // Deposit bookkeeping for the current stroke. Only flow layers build
         // up; a mask's alpha is its payload and has nothing to accumulate
-        // towards.
+        // towards — *except* while erasing, where this records how far the
+        // stroke has already taken each pixel, so that going over a spot again
+        // erases more while sampling the same spot twice within one stroke does
+        // not.
         //
         // Moved out of `self` for the duration of the loop — the layer buffer
         // below is borrowed from `self` too, and they are different fields.
         let key = Some((active_id.clone(), stroke_id));
-        let mut accum_opt: Option<Vec<u8>> = if is_adj {
+        let mut accum_opt: Option<Vec<u8>> = if is_adj && !erase {
             None
         } else {
             let mut a = std::mem::take(&mut self.stroke_accum);

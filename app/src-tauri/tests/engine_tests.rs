@@ -2366,3 +2366,110 @@ fn a_project_from_the_future_is_rejected_rather_than_half_read() {
     std::fs::write(path.to_str().unwrap(), &raw).unwrap();
     assert!(io::load_project(path.to_str().unwrap()).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// The eraser on a mask
+// ---------------------------------------------------------------------------
+
+/// Alpha of a layer's mask at one pixel.
+fn mask_at(e: &Engine, id: &str, n: usize, x: usize, y: usize) -> u8 {
+    e.layer(id)
+        .and_then(|l| l.mask.as_ref())
+        .map(|m| m.data[(y * n + x) * 4 + 3])
+        .unwrap_or(0)
+}
+
+#[test]
+fn the_eraser_removes_a_mask_rather_than_painting_it() {
+    // The bug: a mask stamp always went through the *union* write, which is a
+    // `max` — so erasing an obstacle mask painted it. `erase` was computed and
+    // then ignored on this path.
+    let n = 64;
+    let mut e = Engine::new(n);
+    let id = e.add_layer(LayerKind::Obstacle);
+    e.active = id.clone();
+    e.stroke(&[(0.4, 0.5), (0.6, 0.5)], 30.0, 0.8, 1.0, false, "mask", 1, 1.0);
+    let painted = mask_at(&e, &id, n, n / 2, n / 2);
+    assert!(painted > 200, "the dab should have laid down a mask: {painted}");
+
+    e.stroke(&[(0.4, 0.5), (0.6, 0.5)], 30.0, 0.8, 1.0, true, "mask", 2, 1.0);
+    let after = mask_at(&e, &id, n, n / 2, n / 2);
+    assert!(after < painted / 2, "erasing must remove coverage: {painted} -> {after}");
+}
+
+#[test]
+fn erasing_a_mask_is_idempotent_within_one_stroke() {
+    // A stroke is a dense row of stamps, so overlapping samples must not
+    // compound. `min` is to erasing what `max` is to painting: applying it
+    // twice is the same as applying it once.
+    //
+    // A `prev * (1 - a)` decay would instead make the result a function of how
+    // many stamps landed on the pixel — the middle of a slow drag would be
+    // scrubbed bare while its edges were barely touched.
+    let n = 64;
+    let mut e = Engine::new(n);
+    let id = e.add_layer(LayerKind::Obstacle);
+    e.active = id.clone();
+    let dab = [(0.5f32, 0.5f32)];
+    e.stroke(&dab, 30.0, 0.8, 1.0, false, "mask", 1, 1.0);
+    let painted = mask_at(&e, &id, n, n / 2, n / 2);
+
+    e.stroke(&dab, 30.0, 0.8, 1.0, true, "mask", 2, 1.0);
+    let once = mask_at(&e, &id, n, n / 2, n / 2);
+    // Same stroke id: the pointer just happened to sample this spot again.
+    e.stroke(&dab, 30.0, 0.8, 1.0, true, "mask", 2, 1.0);
+    let twice = mask_at(&e, &id, n, n / 2, n / 2);
+    assert_eq!(once, twice, "a second stamp of the same stroke must not erase more");
+    assert!(once < painted, "and it must have erased something: {painted} -> {once}");
+}
+
+#[test]
+fn erasing_reaches_zero_and_stays_there() {
+    // Erasing is not asymptotic: a fully covered pixel goes to nothing, and
+    // going over it again must not resurrect it.
+    let n = 64;
+    let mut e = Engine::new(n);
+    let id = e.add_layer(LayerKind::Obstacle);
+    e.active = id.clone();
+    e.stroke(&[(0.5, 0.5)], 30.0, 1.0, 1.0, false, "mask", 1, 1.0);
+    for sid in 2..6u64 {
+        e.stroke(&[(0.5, 0.5)], 30.0, 1.0, 1.0, true, "mask", sid, 1.0);
+    }
+    assert_eq!(mask_at(&e, &id, n, n / 2, n / 2), 0, "a hard eraser clears the pixel");
+}
+
+#[test]
+fn the_eraser_works_on_a_wind_mask_too() {
+    // Wind masks are the same payload, so they get the same fix — the eraser
+    // shrinks where the wind applies rather than growing it.
+    let n = 64;
+    let mut e = Engine::new(n);
+    let id = e.add_layer(LayerKind::Wind);
+    e.active = id.clone();
+    e.stroke(&[(0.4, 0.5), (0.6, 0.5)], 30.0, 0.8, 1.0, false, "mask", 1, 1.0);
+    let painted = mask_at(&e, &id, n, n / 2, n / 2);
+    assert!(painted > 200);
+    e.stroke(&[(0.4, 0.5), (0.6, 0.5)], 30.0, 0.8, 1.0, true, "mask", 2, 1.0);
+    assert!(mask_at(&e, &id, n, n / 2, n / 2) < painted / 2, "wind mask must erase too");
+}
+
+#[test]
+fn erasing_a_mask_moves_the_composite_back() {
+    // What the user actually sees: an erased obstacle stops being an obstacle,
+    // and the mobility channel comes back.
+    let n = 64;
+    let mut e = Engine::new(n);
+    let id = e.add_layer(LayerKind::Obstacle);
+    e.active = id.clone();
+    e.stroke(&[(0.4, 0.5), (0.6, 0.5)], 40.0, 0.9, 1.0, false, "mask", 1, 1.0);
+    e.composite();
+    let blocked = e.composite.data[(n / 2 * n + n / 2) * 4 + 2];
+    assert!(blocked < 40, "the pixel should be blocked: {blocked}");
+
+    e.stroke(&[(0.4, 0.5), (0.6, 0.5)], 40.0, 0.9, 1.0, true, "mask", 2, 1.0);
+    e.composite();
+    assert!(
+        e.composite.data[(n / 2 * n + n / 2) * 4 + 2] > 200,
+        "erasing it must let the pixel flow again"
+    );
+}
