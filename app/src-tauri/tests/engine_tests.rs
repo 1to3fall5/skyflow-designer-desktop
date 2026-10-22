@@ -553,6 +553,36 @@ fn a_split_import_lands_two_layers_and_undo_takes_both() {
 }
 
 #[test]
+fn a_split_obstacle_actually_blocks_the_composite() {
+    // The point of splitting is not that the mask has the right numbers, it is
+    // that the picture behaves differently. A mask of the right value on a layer
+    // that does nothing is the same bug as no mask at all.
+    let n = 8;
+    let mut b = Buf::new(n, n);
+    for y in 0..n {
+        for x in 0..n {
+            let i = (y * n + x) * 4;
+            b.data[i] = 128;
+            b.data[i + 1] = 128;
+            // Left half does not flow at all, right half flows freely.
+            b.data[i + 2] = if x < n / 2 { 0 } else { 255 };
+            b.data[i + 3] = 255;
+        }
+    }
+    let p = write_tmp("block_src.png", &[]);
+    io::export_png(&b, false, false, p.to_str().unwrap()).unwrap();
+    let got = io::import_flowmap(p.to_str().unwrap(), n, false, false, false, false, true).unwrap();
+
+    let mut e = Engine::new(n);
+    e.import_layer(got.flow, got.obstacle, "x").unwrap();
+    e.composite();
+    let blocked = e.composite.data[(4 * n + 1) * 4 + 2];
+    let free = e.composite.data[(4 * n + 6) * 4 + 2];
+    assert!(blocked < 10, "the blocked half must report no mobility: {blocked}");
+    assert!(free > 245, "the free half must be untouched: {free}");
+}
+
+#[test]
 fn export_png_respects_channel_inversion() {
     let b = Buf::filled(8, 8, [10, 20, 30, 255]);
     let p = write_tmp("inv.png", &[]);
