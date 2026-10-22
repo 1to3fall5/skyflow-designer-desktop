@@ -52,7 +52,11 @@ export function mergeBlocker(rows: LayerInfo[], activeId: string | null): string
   const rTop = blurRadius(top.effects);
   const rBelow = blurRadius(below.effects);
   if (Math.abs(rTop - rBelow) > 0.01) {
-    return `两层的模糊不一样（${rTop} / ${rBelow}），一个半径表达不了两个`;
+    // Say what to do about it. "A radius cannot express two" is a true sentence
+    // and a useless instruction — and baking only one of them is not enough,
+    // because having no blur at all is a radius too.
+    return `两层的模糊不一样（${rTop} / ${rBelow}），一个半径表达不了两个。` +
+      `对两层各用一次「图层 ▸ 应用图层效果」把模糊烘焙进像素，就能合并了`;
   }
   if (top.kind === 'path' && Math.abs(top.opacity - below.opacity) > 1e-4) {
     return '两条路径层的不透明度不一样，合并会改变结果；先把它们调成一样';

@@ -99,6 +99,8 @@ export const api = {
   removeLayer: (id: string) => invoke<Snapshot>('remove_layer', { id }),
   reorder: (from: number, to: number) => invoke<Snapshot>('reorder', { from, to }),
   mergeDown: (id: string) => invoke<Snapshot>('merge_down', { id }),
+  /** Write a layer's effects into its pixels, so they stop being effects. */
+  bakeEffects: (id: string) => invoke<Snapshot>('bake_effects', { id }),
   setActive: (id: string) => invoke<AppState>('set_active', { id }),
   clearLayer: (id: string) => invoke<Snapshot>('clear_layer', { id }),
   setProjection: (projection: string, polarAngle: number) =>

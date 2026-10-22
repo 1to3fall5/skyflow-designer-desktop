@@ -109,3 +109,21 @@ export function setEffectAmount(fx: LayerEffect[], i: number, v: number): LayerE
 export function removeEffect(fx: LayerEffect[], i: number): LayerEffect[] {
   return fx.filter((_, j) => j !== i);
 }
+
+/**
+ * Why a layer's effects cannot be baked into its pixels, or `null` if they can.
+ *
+ * A menu item has no way to grey itself out, so the rule has to live somewhere
+ * that can *say* it — the same reason `mergeBlocker` exists. Silently doing
+ * nothing is indistinguishable from being broken.
+ */
+export function bakeBlocker(kind: LayerKind, fx: LayerEffect[]): string | null {
+  // Wind regenerates its buffer from two dials on every composite, so anything
+  // written into it would be overwritten the moment one of them moved.
+  if (kind === 'wind') return '风向层的像素是由「方向 / 强度」生成的，写进去也会被下一次生成覆盖';
+  // An obstacle's effect bends the field *underneath* the mask; there is
+  // nothing on the layer itself it could be written into.
+  if (kind === 'obstacle') return '障碍层的绕流作用于下方的流场，没有可以写进这一层的像素';
+  if (blurRadius(fx) <= 0) return '这一层没有开启的模糊效果（只有模糊能烘焙）';
+  return null;
+}

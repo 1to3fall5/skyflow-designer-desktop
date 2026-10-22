@@ -63,6 +63,9 @@ describe('mergeBlocker', () => {
       layer({ id: 'b', effects: [blur(20)] }),
     ];
     expect(mergeBlocker(rows, 'a')).toMatch(/模糊.*8 \/ 20/);
+    // ...and says what to do about it, because 'a radius cannot express two'
+    // is a true sentence and a useless instruction.
+    expect(mergeBlocker(rows, 'a')).toMatch(/应用图层效果/);
     // Equal radii are fine: the merge happens before the blur.
     expect(mergeBlocker([layer({ id: 'a', effects: [blur(8)] }), layer({ id: 'b', effects: [blur(8)] })], 'a')).toBeNull();
   });

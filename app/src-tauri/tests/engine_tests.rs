@@ -552,6 +552,112 @@ fn a_split_import_lands_two_layers_and_undo_takes_both() {
     assert_eq!(e.layers.len(), before, "one step: both layers go, not just one");
 }
 
+// ---------------------------------------------------------------------------
+// Applying an effect: the fx badge becomes pixels
+// ---------------------------------------------------------------------------
+
+#[test]
+fn baking_a_blur_does_not_move_the_picture() {
+    // The hard rule, same as a merge: flattening a style is not an edit. If the
+    // composite shifts by more than 8-bit re-association, "apply" silently
+    // changed the artwork.
+    let n = 64;
+    let mut e = Engine::new(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+    e.stroke(&[(0.3, 0.5), (0.7, 0.5)], 30.0, 0.5, 1.0, false, "color", 1, 1.0);
+    e.set_effects(&id, vec![LayerEffect::blur(8.0)]);
+    e.composite();
+    let before = e.composite.data.clone();
+
+    assert!(e.bake_effects(&id), "a blur on a paint layer must be bakeable");
+    e.composite();
+    assert_same(&e.composite.data, &before, "baking must leave the composite alone");
+}
+
+#[test]
+fn baking_takes_the_effect_off_the_layer() {
+    // Otherwise the composite would apply the same blur a second time to the
+    // pixels it is already in.
+    let n = 64;
+    let mut e = Engine::new(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+    e.stroke(&[(0.5, 0.5)], 30.0, 0.5, 1.0, false, "color", 1, 1.0);
+    e.set_effects(&id, vec![LayerEffect::blur(6.0)]);
+    assert!(e.bake_effects(&id));
+    assert!(
+        !e.layer(&id).unwrap().p.effects.iter().any(|f| f.kind == EffectKind::Blur),
+        "the blur record has to go"
+    );
+}
+
+#[test]
+fn baking_unblocks_a_merge_the_radii_refused() {
+    // The reason this exists. Two layers carrying different radii cannot become
+    // one; once the blur is in the pixels there is no radius left to disagree
+    // about.
+    let n = 64;
+    let mut e = Engine::new(n);
+    let low = e.add_layer(LayerKind::Paint);
+    e.active = low.clone();
+    e.stroke(&[(0.3, 0.5), (0.7, 0.5)], 30.0, 0.5, 1.0, false, "color", 1, 1.0);
+    let top = e.add_layer(LayerKind::Paint);
+    e.active = top.clone();
+    e.stroke(&[(0.3, 0.4), (0.7, 0.6)], 30.0, 0.5, 1.0, false, "color", 2, 1.0);
+    e.set_effects(&low, vec![LayerEffect::blur(4.0)]);
+    e.set_effects(&top, vec![LayerEffect::blur(14.0)]);
+
+    let before = e.layers.len();
+    assert!(!e.merge_down(&top), "different radii must refuse");
+    assert!(e.bake_effects(&top));
+    // Baking one is not enough: no blur at all is *also* a radius, so 0 and 4
+    // are just as different as 4 and 14 were. Both have to go.
+    assert!(!e.merge_down(&top), "0 and 4 are still two radii");
+    assert!(e.bake_effects(&low));
+    assert!(e.merge_down(&top), "baking both unblocks it");
+    assert_eq!(e.layers.len(), before - 1, "two layers have become one");
+}
+
+#[test]
+fn a_bake_is_undoable() {
+    // Two entries, or undo would rewind past the bake entirely — which on a
+    // layer with no other history means undo does nothing at all.
+    let n = 64;
+    let mut e = Engine::new(n);
+    let id = e.add_layer(LayerKind::Paint);
+    e.active = id.clone();
+    e.stroke(&[(0.5, 0.5)], 30.0, 0.5, 1.0, false, "color", 1, 1.0);
+    e.set_effects(&id, vec![LayerEffect::blur(9.0)]);
+    e.composite();
+    let before = e.composite.data.clone();
+
+    assert!(e.bake_effects(&id));
+    assert!(e.undo(), "there must be somewhere to go back to");
+    assert!(
+        e.layer(&id).unwrap().p.effects.iter().any(|f| f.kind == EffectKind::Blur),
+        "undo must bring the blur record back, not just the pixels"
+    );
+    e.composite();
+    assert_same(&e.composite.data, &before, "and the picture with it");
+}
+
+#[test]
+fn a_layer_with_nothing_to_bake_says_no() {
+    let n = 32;
+    let mut e = Engine::new(n);
+    let paint = e.add_layer(LayerKind::Paint);
+    assert!(!e.bake_effects(&paint), "no effects at all");
+
+    let wind = e.add_layer(LayerKind::Wind);
+    e.set_effects(&wind, vec![LayerEffect::blur(8.0)]);
+    assert!(!e.bake_effects(&wind), "wind regenerates its buffer from its dials");
+
+    let obs = e.add_layer(LayerKind::Obstacle);
+    e.set_effects(&obs, vec![LayerEffect::disturbance(0.5)]);
+    assert!(!e.bake_effects(&obs), "a disturbance bends the field underneath, not this layer");
+}
+
 #[test]
 fn a_split_obstacle_actually_blocks_the_composite() {
     // The point of splitting is not that the mask has the right numbers, it is

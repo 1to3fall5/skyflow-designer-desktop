@@ -37,6 +37,7 @@ pub fn run() {
             commands::remove_layer,
             commands::reorder,
             commands::merge_down,
+            commands::bake_effects,
             commands::set_active,
             commands::clear_layer,
             commands::set_projection,

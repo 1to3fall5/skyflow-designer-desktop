@@ -26,7 +26,7 @@ export type MenuCmd =
   | 'view.2d' | 'view.split' | 'view.3d'
   // 图层
   | 'layer.paint' | 'layer.path' | 'layer.wind' | 'layer.obstacle'
-  | 'layer.up' | 'layer.down' | 'layer.delete'
+  | 'layer.up' | 'layer.down' | 'layer.delete' | 'layer.bake'
   // 帮助
   | 'help.shortcuts';
 
@@ -143,6 +143,7 @@ export function buildMenus(recent: string[]): MenuSpec[] {
         item('上移一层', 'layer.up'),
         item('下移一层', 'layer.down'),
         sep,
+        item('应用图层效果', 'layer.bake'),
         item('删除图层', 'layer.delete'),
       ],
     },

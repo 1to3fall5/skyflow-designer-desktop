@@ -24,6 +24,7 @@ import rawFlowShader from './components/FlowShader?raw';
 import rawMerge from './merge?raw';
 import rawMenu from './menu?raw';
 import rawDlg from './components/ImportFlowmapDlg.tsx?raw';
+import rawEffects from './effects?raw';
 // The engine is Rust, so its half of the rule is read straight off disk —
 // see `readSrc` below for how the others get theirs.
 const rawEngine = readFileSync(
@@ -1887,5 +1888,45 @@ describe('导入 Flowmap: a file from somewhere else is the wrong conventions, n
     // `restore` rebuilds from `order` and drops what is left over.
     expect(rawEngine).toMatch(/pub fn import_layer\(&mut self, buf: Buf, mask: Option<Buf>, name: &str\)/);
     expect(rawEngine).toMatch(/self\.push_history\(Vec::new\(\), Some\(order_before\)\)/);
+  });
+});
+
+/**
+ * 应用图层效果 — the fx badge becomes pixels.
+ *
+ * It exists because `merge_down` refuses on differing blur radii, and a user
+ * blocked by that needs a way out. The rule it enforces is the same one as
+ * merging: flattening a style must not move the picture.
+ */
+describe('应用图层效果: an effect stops being an effect', () => {
+  it('is in the layer menu and goes through structural', () => {
+    expect(rawMenu).toMatch(/item\('应用图层效果', 'layer\.bake'\)/);
+    expect(src).toMatch(/case 'layer\.bake': \{/);
+    expect(src).toMatch(/structural\(api\.bakeEffects\(activeLayer!\.id\)\)/);
+  });
+
+  it('says why it cannot, rather than doing nothing', () => {
+    // A menu item cannot grey itself out, so a layer it does not apply to has
+    // to be told so.
+    expect(rawEffects).toMatch(/export function bakeBlocker\(kind: LayerKind, fx: LayerEffect\[\]\)/);
+    expect(src).toMatch(/void message\(why, \{ title: '不能应用效果', kind: 'info' \}\)/);
+  });
+
+  it('refuses the two kinds whose pixels are not theirs to keep', () => {
+    expect(rawEffects).toMatch(/风向层的像素是由「方向 \/ 强度」生成的/);
+    expect(rawEffects).toMatch(/障碍层的绕流作用于下方的流场/);
+  });
+
+  it('tells the blocked merge what to do about it', () => {
+    // "A radius cannot express two" is true and useless. Baking *one* of them
+    // is not enough either — no blur at all is a radius too.
+    expect(rawMerge).toMatch(/对两层各用一次「图层 ▸ 应用图层效果」/);
+  });
+
+  it('bakes into the pixels and drops the record', () => {
+    // Keeping it would apply the same blur twice: once in the buffer, once on
+    // every composite after.
+    expect(rawEngine).toMatch(/pub fn bake_effects\(&mut self, id: &str\)/);
+    expect(rawEngine).toMatch(/l\.p\.effects\.retain\(\|e\| e\.kind != EffectKind::Blur\)/);
   });
 });

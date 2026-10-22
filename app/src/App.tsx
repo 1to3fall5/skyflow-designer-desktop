@@ -5,7 +5,7 @@ import { api, nextStrokeId, AppState, LayerInfo, LayerKind, Snapshot } from './a
 import type { PathData, PathBrush } from './pen';
 import {
   ADDABLE_BY_KIND, FX_META, addEffect, setEffectEnabled, setEffectAmount, removeEffect,
-  formatAmount, type EffectKind, type LayerEffect,
+  formatAmount, bakeBlocker, type EffectKind, type LayerEffect,
 } from './effects';
 import {
   resolveShortcut, shouldPrevent, SHORTCUT_HELP, applyOpacityDigit,
@@ -937,6 +937,15 @@ export default function App() {
       case 'layer.obstacle': structural(api.addLayer('obstacle')); break;
       case 'layer.up': moveActive(-1); break;
       case 'layer.down': moveActive(1); break;
+      case 'layer.bake': {
+        // A menu item cannot grey itself out, so a layer that cannot be baked
+        // has to be told so — the alternative is an item that looks broken.
+        const why = activeLayer ? bakeBlocker(activeLayer.kind, activeLayer.effects) : '没有选中的图层';
+        if (why) void message(why, { title: '不能应用效果', kind: 'info' });
+        else structural(api.bakeEffects(activeLayer!.id));
+        break;
+      }
+
       case 'layer.delete':
         if (activeLayer && state.layers.length > 1) structural(api.removeLayer(activeLayer.id));
         break;

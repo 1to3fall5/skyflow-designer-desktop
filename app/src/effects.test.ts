@@ -18,6 +18,7 @@ import {
   removeEffect,
   setEffectAmount,
   setEffectEnabled,
+  bakeBlocker,
   type EffectKind,
   type LayerEffect,
 } from './effects';
@@ -134,5 +135,39 @@ describe('the catalogue', () => {
     expect(formatAmount('disturbance', 0.5)).toBe('50%');
     expect(formatAmount('disturbance', 1)).toBe('100%');
     expect(formatAmount('blur', 12)).toBe('12');
+  });
+});
+
+/**
+ * Baking: when a layer's effects can stop being effects.
+ *
+ * Only a blur can be baked, and only on a layer whose pixels are its own.
+ * A menu item greys itself out nowhere, so the rule has to be able to *speak* —
+ * otherwise "应用图层效果" looks broken on exactly the layers it does not
+ * apply to.
+ */
+describe('applying an effect', () => {
+  const fx = (kind: 'blur' | 'disturbance', amount: number, enabled = true) => ({ kind, amount, enabled });
+
+  it('is allowed for a blur on a layer that owns its pixels', () => {
+    expect(bakeBlocker('paint', [fx('blur', 8)])).toBeNull();
+    expect(bakeBlocker('path', [fx('blur', 8)])).toBeNull();
+  });
+
+  it('refuses a wind layer, whose pixels come from two dials', () => {
+    // Writing into its buffer would be undone by the next composite.
+    const why = bakeBlocker('wind', [fx('blur', 8)]);
+    expect(why).toMatch(/生成/);
+  });
+
+  it('refuses an obstacle, whose effect bends the field underneath', () => {
+    const why = bakeBlocker('obstacle', [fx('disturbance', 0.5)]);
+    expect(why).toMatch(/绕流/);
+  });
+
+  it('refuses a layer with no blur to bake', () => {
+    expect(bakeBlocker('paint', [])).toMatch(/没有开启的模糊/);
+    // A switched-off blur is not a blur: its radius is zero.
+    expect(bakeBlocker('paint', [fx('blur', 8, false)])).toMatch(/没有开启的模糊/);
   });
 });

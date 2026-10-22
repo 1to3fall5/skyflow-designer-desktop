@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use buf::{wrap_i, Buf};
-use effect::{blur_amount, disturbance_amount, LayerEffect};
+use effect::{blur_amount, disturbance_amount, EffectKind, LayerEffect};
 use ops::{apply_disturbance, blur, blur_influence, flood_fill, generate_wind,
           obstacle_alpha_plane, obstacle_influence, stamp, StampStyle, Projection,
           PAR_MIN_ROWS};
@@ -403,6 +403,50 @@ impl Engine {
         let order_after: Vec<String> = self.layers.iter().map(|l| l.p.id.clone()).collect();
         self.push_history(snaps, Some(order_after));
         Some(id)
+    }
+
+    /// Write a layer's effects into its pixels, so they stop being effects.
+    ///
+    /// This is what unblocks a merge that refuses on "the blur radii differ":
+    /// once the blur is in the pixels there is no radius left to disagree
+    /// about. It is also just what "flatten the style" means — the dial on the
+    /// row goes away and the softness becomes the content.
+    ///
+    /// Only `Blur`, and only on a layer whose pixels are its own:
+    ///
+    /// * **Wind** regenerates its buffer from two parameters every composite,
+    ///   so anything written in here would be overwritten the moment a dial
+    ///   moved.
+    /// * **Obstacle** carries `Disturbance`, which bends the field *underneath*
+    ///   the mask. It has no baked form — there is nothing on that layer it
+    ///   could be written into. (It also cannot be merged, so nothing is lost.)
+    pub fn bake_effects(&mut self, id: &str) -> bool {
+        let Some(l) = self.layer(id) else { return false };
+        if !matches!(l.p.kind, LayerKind::Paint | LayerKind::Path) {
+            return false;
+        }
+        let radius = blur_amount(&l.p.effects);
+        if radius <= 0.0 {
+            return false;
+        }
+        let baked = blur(&l.buf, radius);
+        // Two entries, like any structural step: an entry records the state
+        // *after* its step and undo lands on the one before it, so recording
+        // only the baked state would rewind past the bake entirely — which for
+        // a layer with no other history means undo would do nothing at all.
+        self.save_history_stack(&[id.to_string()]);
+        {
+            let l = self.layer_mut(id).expect("just looked it up");
+            l.buf = baked;
+            // The record has to go, or the composite would apply the same blur
+            // a second time to the pixels it is already in.
+            l.p.effects.retain(|e| e.kind != EffectKind::Blur);
+            l.blur_cache = None;
+            l.buf_dirty = true;
+        }
+        self.full_dirty = true;
+        self.save_history_stack(&[id.to_string()]);
+        true
     }
 
     pub fn remove_layer(&mut self, id: &str) -> bool {
