@@ -825,6 +825,49 @@ describe('layer order: the stack has to be rearrangeable', () => {
     expect(src).toMatch(/<ToolIcon name=\{l\.visible \? 'eye' : 'sq'\}/);
   });
 
+  /**
+   * Deferring the capture kept the eye's click alive, but a press that *does*
+   * cross the threshold — a click with two pixels of drift, which is what a
+   * trackpad hands you — still started a reorder gesture on the eye's behalf.
+   * That is the other half of "点眼睛，操作的却是另一个流向图层": the gesture
+   * ran, and the eye's own handler never fired.
+   *
+   * The eye is not a drag target in Photoshop either; you drag a row by its
+   * thumbnail and its name.
+   */
+  it('keeps the eye out of the row\'s drag gesture altogether', () => {
+    const eye = src.slice(
+      src.indexOf('className={`eye ${l.visible'),
+      src.indexOf('<span className="layer-thumb"'),
+    );
+    expect(eye).not.toBe('');
+    expect(eye).toMatch(/onPointerDown=\{\(e\) => e\.stopPropagation\(\)\}/);
+    // ...and it still stops the click, so toggling does not also select.
+    expect(eye).toMatch(/onClick=\{\(e\) => \{ e\.stopPropagation\(\)/);
+  });
+
+  /**
+   * `swallowClick` exists to stop the click that follows a reorder from also
+   * selecting a row. Setting it *before* the "did this land somewhere else"
+   * test arms it for a press that dragged and came back — that click gets
+   * eaten, and so does the next real one. A stale `activeLayer` is then what
+   * the next edit is applied to, which is how an edit lands on a layer the
+   * user never touched.
+   */
+  it('arms swallowClick only after a reorder has actually been decided', () => {
+    const bodies = [
+      src.slice(src.indexOf('const beginDockDrag'), src.indexOf('const beginRowDrag')),
+      src.slice(src.indexOf('const beginRowDrag'), src.indexOf('const panels: Record<PanelId')),
+    ];
+    for (const b of bodies) {
+      expect(b).not.toBe('');
+      const guard = b.indexOf('if (!over || over === ');
+      const swallow = b.indexOf('swallowClick.current = true;');
+      expect(guard).toBeGreaterThan(-1);
+      expect(swallow).toBeGreaterThan(guard);
+    }
+  });
+
   it('offers buttons as well, because a drag handle is undiscoverable', () => {
     expect(src).toMatch(/disabled=\{!canMoveUp\} onClick=\{\(\) => moveActive\(-1\)\}/);
     expect(src).toMatch(/disabled=\{!canMoveDown\} onClick=\{\(\) => moveActive\(1\)\}/);

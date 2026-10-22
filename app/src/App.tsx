@@ -997,8 +997,9 @@ export default function App() {
       if (phase === 'move') { setDockDrag({ id, over: over as PanelId | null }); return; }
       setDockDrag(null);
       if (phase !== 'end') return;
+      if (!over || over === id) return;
       swallowClick.current = true;
-      if (over && over !== id) reorderPanel(id, over);
+      reorderPanel(id, over);
     });
   };
 
@@ -1009,8 +1010,13 @@ export default function App() {
       if (phase === 'move') { setRowDrag({ id: lid, over }); return; }
       setRowDrag(null);
       if (phase !== 'end') return;
-      swallowClick.current = true;
       if (!over || over === lid) return;
+      // Only a reorder earns a swallowed click. Setting it on a press that
+      // crossed the threshold but came back to its own row would eat the
+      // *next* real click — which is how "I clicked that row and nothing
+      // happened" starts, and from there, how the wrong layer ends up
+      // selected when the next edit goes through `activeLayer`.
+      swallowClick.current = true;
       const from = layers.findIndex((l) => l.id === lid);
       const to = layers.findIndex((l) => l.id === over);
       if (from >= 0 && to >= 0) structural(api.reorder(from, to));
@@ -1158,6 +1164,17 @@ export default function App() {
                 <button className={`eye ${l.visible ? 'shown' : ''}`}
                   title={l.visible ? '隐藏图层' : '显示图层'}
                   aria-label={l.visible ? '隐藏图层' : '显示图层'}
+                  // The row is the drag handle, and this button lives inside
+                  // it. Letting the press through starts a reorder gesture, and
+                  // once that passes its 4px threshold it captures the pointer
+                  // — which retargets the *click* to the row, so the eye's own
+                  // handler never runs and the row's does. A press that drifts
+                  // a few pixels while clicking the eye then either selects the
+                  // layer instead of hiding it, or reorders the stack outright.
+                  //
+                  // The eye column is not a drag target in Photoshop either:
+                  // you drag a layer by its thumbnail and its name.
+                  onPointerDown={(e) => e.stopPropagation()}
                   onClick={(e) => { e.stopPropagation(); updateLayer(l.id, { visible: !l.visible }); }}>
                   <ToolIcon name={l.visible ? 'eye' : 'sq'} size={15} />
                 </button>
