@@ -2924,3 +2924,88 @@ fn a_project_that_already_contains_a_duplicate_id_is_healed_on_load() {
         "healing must not drop a layer"
     );
 }
+
+/// A paint layer that already covers every pixel — which is what an imported
+/// flowmap is, its alpha being 255 everywhere.
+fn covered_paint(e: &mut Engine, n: usize) -> String {
+    let id = e.active.clone();
+    e.layer_mut(&id).unwrap().buf = Buf::filled(n, n, [128, 128, 255, 255]);
+    id
+}
+
+#[test]
+fn one_pass_deposits_exactly_its_own_opacity() {
+    // flow is "how much of the way one pass goes", so the coverage it leaves
+    // behind has to be proportional to it.
+    let n = 128;
+    for &flow in &[1.0f32, 0.5, 0.25, 0.1] {
+        let mut e = Engine::new(n);
+        let id = e.active.clone();
+        e.stroke(&[(0.4, 0.5), (0.6, 0.5)], 40.0, 0.8, 1.0, false, "content", 1, flow);
+        let a = { let l = e.layer(&id).unwrap(); l.buf.data[((n / 2) * n + n / 2) * 4 + 3] };
+        let want = 255.0 * flow;
+        assert!(
+            (a as f32 - want).abs() <= 2.0,
+            "flow {flow} left coverage {a}, wanted ~{want:.0}",
+        );
+    }
+}
+
+#[test]
+fn the_brushs_opacity_reaches_a_layer_that_already_covers_everything() {
+    // The regression: `flow` only ever gated coverage, and coverage was
+    // already at its ceiling here. The colour was then written at the brush's
+    // own weight regardless, so one pass landed at full strength and 0.10
+    // came out byte-identical to 1.00 — the slider was dead on every imported
+    // flowmap, which is exactly the layer you most want to paint over.
+    //
+    // What you see is the *product* of coverage and colour, so that is what
+    // `flow` has to push. On a bare pixel the product is carried by coverage
+    // alone and nothing moves; on a covered one it is carried by the colour.
+    let n = 128;
+    for (flow, want) in [(1.0f32, 127.0), (0.5, 63.5), (0.25, 31.75), (0.1, 12.7)] {
+        let mut e = Engine::new(n);
+        covered_paint(&mut e, n);
+        // Covered, so the composite here *is* this layer: 128 - R is how far
+        // the vector has turned towards the stroke.
+        e.stroke(&[(0.4, 0.5), (0.6, 0.5)], 40.0, 0.8, 1.0, false, "content", 1, flow);
+        let got = centre(&mut e);
+        assert!((got - want).abs() <= 3.0, "flow {flow} landed at {got:.1}, wanted ~{want:.1}");
+    }
+}
+
+#[test]
+fn passes_over_a_covered_layer_compound_the_way_flow_is_supposed_to() {
+    // Not just one pass: n passes at flow f have to land at 1-(1-f)^n, or a
+    // low-opacity brush could never finish a stroke it started.
+    let n = 128;
+    let f = 0.25f32;
+    let mut e = Engine::new(n);
+    covered_paint(&mut e, n);
+    for k in 1..=4u64 {
+        e.stroke(&[(0.4, 0.5), (0.6, 0.5)], 40.0, 0.8, 1.0, false, "content", k, f);
+        let want = 127.0 * (1.0 - (1.0 - f).powi(k as i32));
+        let got = centre(&mut e);
+        assert!((got - want).abs() <= 4.0, "after {k} passes: {got:.1}, wanted ~{want:.1}");
+    }
+}
+
+#[test]
+fn erasing_a_flow_layer_still_leaves_its_direction_alone() {
+    // The colour used to be skipped by hand on the way out. Pushing the
+    // premultiplied product instead gets that for free — with the target at
+    // zero, colour and coverage shrink by the same factor and their quotient
+    // is unchanged — so this is the guard on that reasoning.
+    let n = 128;
+    let mut e = Engine::new(n);
+    let id = covered_paint(&mut e, n);
+    e.stroke(&[(0.4, 0.5), (0.6, 0.5)], 40.0, 0.8, 1.0, false, "content", 1, 1.0);
+    let painted = { let l = e.layer(&id).unwrap(); l.buf.data[((n / 2) * n + n / 2) * 4] };
+    e.stroke(&[(0.4, 0.5), (0.6, 0.5)], 40.0, 0.8, 1.0, true, "content", 2, 1.0);
+    let (after, cov) = {
+        let l = e.layer(&id).unwrap();
+        (l.buf.data[((n / 2) * n + n / 2) * 4], l.buf.data[((n / 2) * n + n / 2) * 4 + 3])
+    };
+    assert_eq!(after, painted, "erasing must not move the direction");
+    assert_eq!(cov, 0, "but it must take the coverage away: {cov}");
+}

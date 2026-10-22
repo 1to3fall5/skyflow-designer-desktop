@@ -534,29 +534,47 @@ pub fn stamp(
                     // does not change where it ends up.
                     let k = (w_new - w_prev) / (1.0 - w_prev);
                     let back = 1.0 - k;
-                    // Snapshot before the colour write: `write_union` sets alpha
-                    // to the coverage union, and lerping *from* that would pin
-                    // coverage at the brush's own value however low the flow.
-                    let prev_a = d4[3];
 
-                    if !style.erase {
-                        // All of the build-up lives in **coverage**, and the
-                        // colour is written at its final value straight away.
-                        //
-                        // Fading the colour towards its target as well would
-                        // multiply the two, so the visible strength would go
-                        // as `(1-(1-flow)^n)^2`: at flow 0.25 the first pass
-                        // lands at ~6% instead of 25%, and you have to scribble
-                        // eight times before anything is visible.
-                        //
-                        // Keeping the direction at full strength does not make
-                        // it switch abruptly, because what you see is the
-                        // *composite*: `alpha * mine + (1-alpha) * wind`. The
-                        // vector rotates from the wind towards the stroke as
-                        // coverage builds, which is the whole point.
-                        write_union(d4, a, style);
+                    // What you see is neither the colour nor the coverage — it
+                    // is their product, the layer's premultiplied appearance
+                    // `alpha * colour`. *That* is the quantity `flow` has to
+                    // gate, and gating either factor alone cannot do it:
+                    //
+                    // * coverage alone leaves the colour snapping to the brush
+                    //   in one pass, so on a layer that already covers
+                    //   everything — an imported flowmap, whose alpha is 255
+                    //   everywhere — the slider has nothing left to modulate
+                    //   and every stroke lands at full strength however low
+                    //   the number: 0.10 and 1.00 came out identical;
+                    // * colour alone squares the rate on a bare pixel, so at
+                    //   flow 0.25 the first pass lands at ~6% instead of 25%
+                    //   and you have to scribble eight times to see anything.
+                    //
+                    // Pushing the product by `k` does both at once, and is
+                    // exactly what `write_union` already computed at
+                    // `flow = 1`: there `k == a` and the quotient below is
+                    // its weighted mean, byte for byte.
+                    //
+                    // It also retires the erase special case: with the target
+                    // at zero the product and the coverage shrink by the same
+                    // `back`, so their quotient — the colour — is untouched,
+                    // which is what `destination-out` amounts to anyway.
+                    let prev_a = d4[3] as f32 / 255.0;
+                    let tgt = tgt_a / 255.0;
+                    let new_a = prev_a + (tgt - prev_a) * k;
+                    if new_a > 1e-4 {
+                        for c in 0..3usize {
+                            let src = match c {
+                                0 => style.r,
+                                1 => style.g,
+                                _ => style.b,
+                            } as f32;
+                            let a0 = prev_a * d4[c] as f32;
+                            let a1 = a0 * back + tgt * src * k;
+                            d4[c] = (a1 / new_a + 0.5) as u8;
+                        }
                     }
-                    d4[3] = push_toward(prev_a as f32, tgt_a, back);
+                    d4[3] = push_toward(d4[3] as f32, tgt_a, back);
                     acc[aidx] = (w_new * 255.0 + 0.5) as u8;
                 }
             } else if style.erase {
