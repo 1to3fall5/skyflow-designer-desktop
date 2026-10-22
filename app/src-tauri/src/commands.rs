@@ -119,6 +119,20 @@ pub struct ExportReq {
     pub size: Option<usize>,
 }
 
+#[derive(Deserialize)]
+pub struct ImportReq {
+    pub path: String,
+    /// Same convention as `ExportReq`: exporting with a flag and importing with
+    /// the same one is a round trip.
+    pub invert_x: bool,
+    pub invert_y: bool,
+    /// A file with no alpha decodes to zero everywhere. Treat that as opaque
+    /// rather than as a layer you cannot see.
+    pub opaque_if_flat_alpha: bool,
+    /// B means mobility here and blue out there; overwrite it with 255.
+    pub free_mobility: bool,
+}
+
 // ---------------------------------------------------------------------------
 
 fn b64(bytes: &[u8]) -> String {
@@ -478,6 +492,35 @@ pub fn export_flowmap(req: ExportReq, state: State<AppState>) -> Result<(), Stri
     let buf = e.composite.clone();
     drop(e);
     io::export(&buf, &req.path, req.invert_x, req.invert_y, req.size)
+}
+
+/// Read an image file in as a new paint layer.
+///
+/// Importing is the inverse of `export_flowmap`, and the flags are the same
+/// three the export dialog offers plus two that only make sense coming in:
+/// a file from another tool has neither an alpha that means anything nor a
+/// mobility channel, and both have to be repaired on the way in or the layer
+/// arrives invisible, or covered in obstacles nobody drew.
+#[tauri::command]
+pub fn import_flowmap(req: ImportReq, state: State<AppState>) -> Result<Snapshot, String> {
+    let mut e = state.engine.lock().unwrap();
+    let size = e.size;
+    let name = std::path::Path::new(&req.path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("导入的 Flowmap")
+        .to_string();
+    let buf = io::import_flowmap(
+        &req.path,
+        size,
+        req.invert_x,
+        req.invert_y,
+        req.opaque_if_flat_alpha,
+        req.free_mobility,
+    )?;
+    e.import_layer(buf, &name).ok_or("导入的尺寸与画布不符")?;
+    drop(e);
+    Ok(emit(&state))
 }
 
 #[tauri::command]

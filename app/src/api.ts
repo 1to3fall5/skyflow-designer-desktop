@@ -107,6 +107,13 @@ export const api = {
     invoke<void>('export_flowmap', { req: { path, invert_x: invertX, invert_y: invertY, size } }),
   saveProject: (path: string) => invoke<void>('save_project', { path }),
   loadProject: (path: string) => invoke<Snapshot>('load_project', { path }),
+  /** Read an image file in as a new paint layer. */
+  importFlowmap: (path: string, invertX: boolean, invertY: boolean,
+                  opaqueIfFlatAlpha: boolean, freeMobility: boolean) =>
+    invoke<Snapshot>('import_flowmap', {
+      req: { path, invert_x: invertX, invert_y: invertY, opaque_if_flat_alpha: opaqueIfFlatAlpha,
+             free_mobility: freeMobility },
+    }),
   newProject: (size: number) => invoke<Snapshot>('new_project', { size }),
   pushRecent: (path: string) => invoke<void>('push_recent', { path }),
   getRecent: () => invoke<string[]>('get_recent'),

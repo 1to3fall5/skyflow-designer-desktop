@@ -894,3 +894,38 @@ kbd {
 }
 
 .loading { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--fg-mute); }
+
+/* Import dialog -------------------------------------------------------------
+   The one place where a file that did not come from this app is interpreted,
+   so the repairs are offered here instead of being decided in the engine: each
+   one is a guess, and a wrong guess does not fail, it just imports quietly. */
+.modal-scrim {
+  position: fixed; inset: 0; z-index: 70;
+  background: rgba(0, 0, 0, .5);
+  display: flex; align-items: center; justify-content: center;
+}
+.modal {
+  width: 380px; max-width: calc(100vw - 32px);
+  background: var(--bg-2); border: 1px solid var(--line-2);
+  border-radius: var(--r-lg); padding: 14px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .6);
+  font-size: 12px; color: var(--fg);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.modal-title { font-size: 12px; font-weight: 600; }
+.modal-file {
+  background: var(--bg-3); border: 1px solid var(--line-2); border-radius: var(--r);
+  padding: 5px 7px; color: var(--fg-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* Explanatory text is here to be read — `--fg-mute` on a card is about 4:1,
+   which is fine for a label you already understand and too low for 11px prose
+   that is the only thing telling you what a flag does. */
+.modal-hint { color: var(--fg-dim); line-height: 1.5; }
+.modal-row { display: flex; gap: 8px; align-items: flex-start; padding: 2px 0; cursor: pointer; }
+/* The checkbox must not stretch to the row's height, or it floats next to the
+   first line instead of beside the label's text. */
+.modal-row input[type=checkbox] { flex: none; margin: 2px 0 0; }
+.modal-note { display: block; color: var(--fg-dim); font-size: 11px; line-height: 1.45; margin-top: 2px; }
+.modal-sep { height: 1px; background: var(--line); margin: 2px 0; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }

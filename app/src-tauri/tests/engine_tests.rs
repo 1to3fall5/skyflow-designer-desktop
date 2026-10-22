@@ -389,6 +389,104 @@ fn export_tga_writes_valid_header() {
 }
 
 #[test]
+fn export_tga_round_trips_every_channel() {
+    // TGA stores B,G,R,A while this engine's buffers are R,G,B,A. Writing the
+    // channels in buffer order instead of storage order is not a convention
+    // choice — decoded again, the horizontal offset came back in G and the
+    // mobility mask in R, so a TGA round-trip permuted all three.
+    let b = Buf::filled(8, 8, [10, 20, 30, 255]);
+    let p = write_tmp("rt.tga", &[]);
+    io::export_tga(&b, false, false, p.to_str().unwrap()).unwrap();
+    let back = io::load_reference(p.to_str().unwrap(), 8).unwrap();
+    assert_eq!(&back.data[..4], &[10, 20, 30, 255], "R,G,B,A must come back in order");
+}
+
+#[test]
+fn export_tga_inverts_the_same_channels_as_png() {
+    // The two writers are read by the same importer, so they have to agree on
+    // which channel is which — otherwise importing a PNG and a TGA of the same
+    // flowmap would give two different fields.
+    let b = Buf::filled(8, 8, [10, 20, 30, 255]);
+    for (ix, iy) in [(false, false), (true, false), (false, true), (true, true)] {
+        let t = write_tmp("cmp.tga", &[]);
+        let g = write_tmp("cmp.png", &[]);
+        io::export_tga(&b, ix, iy, t.to_str().unwrap()).unwrap();
+        io::export_png(&b, ix, iy, g.to_str().unwrap()).unwrap();
+        let from_tga = io::load_reference(t.to_str().unwrap(), 8).unwrap();
+        let from_png = io::load_reference(g.to_str().unwrap(), 8).unwrap();
+        assert_eq!(
+            &from_tga.data[..4], &from_png.data[..4],
+            "TGA and PNG must agree (invert_x={ix}, invert_y={iy})"
+        );
+    }
+}
+
+#[test]
+fn import_repairs_an_alpha_the_file_never_had() {
+    // Most flowmaps are stored without an alpha channel, which decodes as zero
+    // everywhere. Taken literally the layer arrives perfectly good and perfectly
+    // invisible.
+    let b = Buf::filled(8, 8, [10, 20, 30, 0]);
+    let p = write_tmp("noalpha.png", &[]);
+    io::export_png(&b, false, false, p.to_str().unwrap()).unwrap();
+
+    let kept = io::import_flowmap(p.to_str().unwrap(), 8, false, false, false, false).unwrap();
+    assert_eq!(kept.data[3], 0, "with the flag off, take the file at its word");
+
+    let fixed = io::import_flowmap(p.to_str().unwrap(), 8, false, false, true, false).unwrap();
+    assert_eq!(fixed.data[3], 255, "a flat alpha means 'no opinion', not 'invisible'");
+}
+
+#[test]
+fn import_frees_the_mobility_channel() {
+    // B means mobility here and blue out there. Whatever the file stored there
+    // is noise, and noise in that channel is obstacles the author never drew.
+    let b = Buf::filled(8, 8, [10, 20, 30, 255]);
+    let p = write_tmp("mob.png", &[]);
+    io::export_png(&b, false, false, p.to_str().unwrap()).unwrap();
+
+    let raw = io::import_flowmap(p.to_str().unwrap(), 8, false, false, false, false).unwrap();
+    assert_eq!(raw.data[2], 30, "with the flag off, keep what was stored");
+
+    let freed = io::import_flowmap(p.to_str().unwrap(), 8, false, false, false, true).unwrap();
+    assert_eq!(freed.data[2], 255, "mobility defaults to fully free");
+    assert_eq!(&freed.data[..2], &[10, 20], "and the offsets are untouched");
+}
+
+#[test]
+fn import_undoes_the_export_inversion() {
+    // Both are `255 - c`, and that is an involution, which is why one flag
+    // serves both directions: write with a flag, read with the same one.
+    let b = Buf::filled(8, 8, [10, 20, 30, 255]);
+    let p = write_tmp("rtrip.png", &[]);
+    io::export_png(&b, true, true, p.to_str().unwrap()).unwrap();
+    let back = io::import_flowmap(p.to_str().unwrap(), 8, true, true, false, false).unwrap();
+    assert_eq!(&back.data[..3], &[10, 20, 30], "export inverted, import inverts back");
+}
+
+#[test]
+fn importing_a_layer_is_one_undo_step() {
+    // It is a structural edit, so undo has to take the whole layer away — and
+    // the 'before' entry carries no snapshot, only an order that lacks it,
+    // which is what makes that possible.
+    let n = 32;
+    let mut e = Engine::new(n);
+    let before = e.layers.len();
+    let id = e.import_layer(Buf::filled(n, n, [128, 128, 255, 255]), "导入的图").unwrap();
+    assert_eq!(e.layers.len(), before + 1);
+    assert_eq!(e.active, id, "the imported layer becomes the active one");
+    assert_eq!(e.layer(&id).unwrap().p.name, "导入的图");
+
+    assert!(e.undo(), "there must be somewhere to go back to");
+    assert!(
+        !e.layers.iter().any(|l| l.p.id == id),
+        "undo must remove the imported layer, not just its pixels"
+    );
+    assert!(e.redo());
+    assert!(e.layers.iter().any(|l| l.p.id == id), "and redo must bring it back");
+}
+
+#[test]
 fn export_png_respects_channel_inversion() {
     let b = Buf::filled(8, 8, [10, 20, 30, 255]);
     let p = write_tmp("inv.png", &[]);

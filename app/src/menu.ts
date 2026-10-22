@@ -18,6 +18,7 @@
 export type MenuCmd =
   // 文件
   | 'file.new' | 'file.open' | 'file.save' | 'file.saveAs' | 'file.import' | 'file.export'
+  | 'file.importFlowmap'
   // 编辑
   | 'edit.undo' | 'edit.redo' | 'edit.clear'
   // 视图
@@ -103,6 +104,7 @@ export function buildMenus(recent: string[]): MenuSpec[] {
         item('另存为…', 'file.saveAs'),
         sep,
         item('导入天空图…', 'file.import'),
+        item('导入 Flowmap 为图层…', 'file.importFlowmap'),
         item('导出 Flowmap…', 'file.export'),
       ],
     },

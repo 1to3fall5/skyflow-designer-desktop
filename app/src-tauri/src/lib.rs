@@ -41,6 +41,7 @@ pub fn run() {
             commands::clear_layer,
             commands::set_projection,
             commands::export_flowmap,
+            commands::import_flowmap,
             commands::save_project,
             commands::load_project,
             commands::new_project,

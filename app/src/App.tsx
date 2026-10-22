@@ -17,6 +17,7 @@ import Preview3D, { Preview3DHandle } from './components/Preview3D';
 import { ToolIcon } from './icons';
 import AppBar from './AppBar';
 import { mergeBlocker, mergeTitle } from './merge';
+import ImportFlowmapDlg, { type ImportOpts } from './components/ImportFlowmapDlg';
 import type { MenuCmd } from './menu';
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
@@ -416,6 +417,36 @@ export default function App() {
       setState(s);
       await reloadRef();
       setShowReference(true);
+    } catch (e) {
+      await message(`${e}\n\n支持：PNG / JPEG / BMP / TIFF / WEBP / TGA（含 RLE、16/24/32 位）`,
+        { title: '导入失败', kind: 'error' });
+    }
+    setBusy(false);
+  };
+
+  /** A file picked for `file.importFlowmap`, waiting on the dialog. */
+  const [importPath, setImportPath] = useState<string | null>(null);
+
+  const pickFlowmap = async () => {
+    const p = await open({
+      multiple: false,
+      // Same list `importImage` offers: these are the formats the backend
+      // actually decodes.
+      filters: [{ name: 'Flowmap', extensions: ['png', 'jpg', 'jpeg', 'bmp', 'tga', 'tif', 'tiff', 'webp'] }],
+    }) as string | null;
+    if (p) setImportPath(p);
+  };
+
+  const runImportFlowmap = async (o: ImportOpts) => {
+    const p = importPath;
+    if (!p) return;
+    setImportPath(null);
+    setBusy(true);
+    try {
+      // A new layer with its own pixels: structural, so it also refreshes the
+      // arrow overlay and the layer thumbnails.
+      const snap = await api.importFlowmap(p, o.invertX, o.invertY, o.opaqueIfFlatAlpha, o.freeMobility);
+      await structural(Promise.resolve(snap));
     } catch (e) {
       await message(`${e}\n\n支持：PNG / JPEG / BMP / TIFF / WEBP / TGA（含 RLE、16/24/32 位）`,
         { title: '导入失败', kind: 'error' });
@@ -881,6 +912,7 @@ export default function App() {
       case 'file.save': void doSave(false); break;
       case 'file.saveAs': void doSave(true); break;
       case 'file.import': void importImage(); break;
+      case 'file.importFlowmap': void pickFlowmap(); break;
       case 'file.export': void doExport(); break;
 
       case 'edit.undo': structural(api.undo()); break;
@@ -1629,6 +1661,19 @@ export default function App() {
           <b>快捷键</b>
           {SHORTCUT_HELP.map(([n, k]) => (<div key={n}><span>{n}</span><kbd>{k}</kbd></div>))}
         </div>
+      )}
+
+      {importPath && (
+        <ImportFlowmapDlg
+          path={importPath}
+          // The two repairs default to on: they are what a file from another
+          // tool almost always needs. The inversions start from the export
+          // settings, because the common case is reading back what was written.
+          defaults={{ opaqueIfFlatAlpha: true, freeMobility: true, invertX, invertY }}
+          busy={busy}
+          onCancel={() => setImportPath(null)}
+          onOk={runImportFlowmap}
+        />
       )}
     </div>
   );

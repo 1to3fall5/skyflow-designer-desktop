@@ -344,6 +344,43 @@ impl Engine {
         id
     }
 
+    /// Drop an imported image into a new paint layer.
+    ///
+    /// Two history entries, like any other structural step, and for the same
+    /// reason an entry records the state *after* its step while undo lands on
+    /// the one before it:
+    ///
+    /// * the **before** entry carries no snapshot at all, only an `order` that
+    ///   lacks this layer — which is exactly how undo gets rid of it, since
+    ///   `restore` rebuilds the stack from `order` and drops whatever is left
+    ///   over;
+    /// * the **after** entry carries its snapshot, which is how redo brings it
+    ///   back.
+    pub fn import_layer(&mut self, buf: Buf, name: &str) -> Option<String> {
+        if buf.w != self.size || buf.h != self.size {
+            return None;
+        }
+        let order_before: Vec<String> = self.layers.iter().map(|l| l.p.id.clone()).collect();
+        let id = self.add_layer(LayerKind::Paint);
+        {
+            let l = self.layer_mut(&id)?;
+            l.buf = buf;
+            if !name.is_empty() {
+                l.p.name = name.to_string();
+            }
+            l.buf_dirty = true;
+        }
+        self.active = id.clone();
+        self.full_dirty = true;
+        self.invalidate_accum();
+
+        self.push_history(Vec::new(), Some(order_before));
+        let after = snapshot_of(self.layer(&id)?);
+        let order_after: Vec<String> = self.layers.iter().map(|l| l.p.id.clone()).collect();
+        self.push_history(vec![after], Some(order_after));
+        Some(id)
+    }
+
     pub fn remove_layer(&mut self, id: &str) -> bool {
         if self.layers.len() <= 1 {
             return false;

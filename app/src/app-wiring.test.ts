@@ -22,10 +22,16 @@ import rawFlowWarp from './flowWarp?raw';
 import rawArrows from './arrows?raw';
 import rawFlowShader from './components/FlowShader?raw';
 import rawMerge from './merge?raw';
+import rawMenu from './menu?raw';
+import rawDlg from './components/ImportFlowmapDlg.tsx?raw';
 // The engine is Rust, so its half of the rule is read straight off disk —
 // see `readSrc` below for how the others get theirs.
 const rawEngine = readFileSync(
   new URL('../src-tauri/src/engine/mod.rs', import.meta.url),
+  'utf8',
+);
+const rawIo = readFileSync(
+  new URL('../src-tauri/src/engine/io.rs', import.meta.url),
   'utf8',
 );
 // Vite's CSS plugin turns `styles.css?raw` into an empty string, so read
@@ -1814,5 +1820,59 @@ describe('向下合并: two layers become one, the picture must not move', () =>
     // both sides of a structural step for that reason.
     expect(rawEngine).toMatch(/fn save_history_stack\(&mut self, ids: &\[String\]\)/);
     expect(rawEngine).toMatch(/order: Option<Vec<String>>/);
+  });
+});
+
+/**
+ * 导入 Flowmap.
+ *
+ * The inverse of 导出, and the only place a file from outside the app is
+ * interpreted. Each repair is a guess, so each one has to be *offered* — the
+ * failure mode of guessing wrong is not an error, it is a layer that arrives
+ * invisible or covered in obstacles nobody drew.
+ */
+describe('导入 Flowmap: a file from somewhere else is the wrong conventions, not the wrong shape', () => {
+  it('is in the file menu, next to the export it inverts', () => {
+    expect(rawMenu).toMatch(/item\('导入 Flowmap 为图层…', 'file\.importFlowmap'\)/);
+    expect(src).toMatch(/case 'file\.importFlowmap': void pickFlowmap\(\); break;/);
+  });
+
+  it('goes through structural, not the pixels-only applySnap', () => {
+    // It adds a layer. `applySnap` would leave React holding the old layer
+    // list, so the new row would never appear in the panel.
+    expect(src).toMatch(/await structural\(Promise\.resolve\(snap\)\)/);
+  });
+
+  it('offers the two repairs instead of deciding them in the engine', () => {
+    // Both default on: they are what a file from another tool almost always
+    // needs, and neither can be inferred from the pixels.
+    expect(src).toMatch(/defaults=\{\{ opaqueIfFlatAlpha: true, freeMobility: true, invertX, invertY \}\}/);
+    expect(rawDlg).toMatch(/没有 alpha 就当作不透明/);
+    expect(rawDlg).toMatch(/B 通道按「完全可流动」处理/);
+  });
+
+  it('starts the inversions from the export settings', () => {
+    // The common case is reading back what this app wrote, and the flag is an
+    // involution — write with it, read with it.
+    expect(src).toMatch(/, invertX, invertY \}\}/);
+  });
+
+  it('sends all four flags to the engine', () => {
+    expect(rawApi).toMatch(/importFlowmap: \(path: string, invertX: boolean, invertY: boolean,/);
+    expect(rawApi).toMatch(/opaque_if_flat_alpha: opaqueIfFlatAlpha/);
+    expect(rawApi).toMatch(/free_mobility: freeMobility/);
+  });
+
+  it('repairs the alpha and the mobility channel on the way in', () => {
+    expect(rawIo).toMatch(/pub fn import_flowmap\(/);
+    expect(rawIo).toMatch(/if max_a < 8 \{/);
+    expect(rawIo).toMatch(/buf\.data\.chunks_exact_mut\(4\)\.for_each\(\|c\| c\[2\] = 255\)/);
+  });
+
+  it('is one undo step, which means the layer has to leave the stack again', () => {
+    // A structural entry with no snapshot and an order that lacks the layer —
+    // `restore` rebuilds from `order` and drops what is left over.
+    expect(rawEngine).toMatch(/pub fn import_layer\(&mut self, buf: Buf, name: &str\)/);
+    expect(rawEngine).toMatch(/self\.push_history\(Vec::new\(\), Some\(order_before\)\)/);
   });
 });

@@ -19,8 +19,14 @@ const FORMAT_VERSION: u32 = 3;
 // ---------------------------------------------------------------------------
 
 pub fn load_reference(path: &str, size: usize) -> Result<Buf, String> {
-    // TGA is not covered by the `image` crate's default codecs; handle the two
-    // common uncompressed variants directly.
+    decode_image(path, size)
+}
+
+/// Decode any image the app can open, resized to the canvas.
+///
+/// TGA is not covered by the `image` crate's default codecs; `load_tga` handles
+/// the variants that matter.
+fn decode_image(path: &str, size: usize) -> Result<Buf, String> {
     if path.to_lowercase().ends_with(".tga") {
         return load_tga(path, size);
     }
@@ -209,9 +215,16 @@ pub fn export_tga(buf: &Buf, invert_x: bool, invert_y: bool, path: &str) -> Resu
     for y in 0..h {
         for x in 0..w {
             let i = (y * w + x) * 4;
-            row[x * 4] = if invert_y { 255 - buf.data[i + 1] } else { buf.data[i + 1] };
-            row[x * 4 + 1] = if invert_x { 255 - buf.data[i] } else { buf.data[i] };
-            row[x * 4 + 2] = buf.data[i + 2];
+            // TGA stores true-colour as **B,G,R,A** and `decode_tga_px` reads it
+            // back in that order, so these bytes are blue, green, red.
+            //
+            // They used to be written green, red, blue. That is not an equally
+            // valid convention: decoded again, the horizontal offset came back
+            // in G, the vertical one in R and the mobility mask in B, so
+            // exporting a TGA and reading it back permuted all three channels.
+            row[x * 4] = buf.data[i + 2];
+            row[x * 4 + 1] = if invert_y { 255 - buf.data[i + 1] } else { buf.data[i + 1] };
+            row[x * 4 + 2] = if invert_x { 255 - buf.data[i] } else { buf.data[i] };
             row[x * 4 + 3] = 255;
         }
         out.extend_from_slice(&row);
@@ -235,6 +248,59 @@ pub fn export(
     } else {
         export_png(&scaled, invert_x, invert_y, path)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Import
+// ---------------------------------------------------------------------------
+
+/// Read an image file as flowmap pixels: R/G are the offsets, B is mobility,
+/// A is coverage.
+///
+/// The three flags exist because a file that came from somewhere else is not
+/// the same shape as one this app wrote, and guessing wrong is silent:
+///
+/// * **`opaque_if_flat_alpha`** — most flowmaps are stored without an alpha
+///   channel, which decodes as zero everywhere. Taken literally that imports a
+///   perfectly good layer you cannot see.
+/// * **`free_mobility`** — B means *mobility* here and *blue* out there. Leaving
+///   whatever the file had in it would paint obstacles the author never drew.
+/// * **`invert_x` / `invert_y`** — the same `255 - c` the export applies, so a
+///   file written with a flag set and read back with the same one is a round
+///   trip. Both are involutions, which is why one flag serves both directions.
+pub fn import_flowmap(
+    path: &str,
+    size: usize,
+    invert_x: bool,
+    invert_y: bool,
+    opaque_if_flat_alpha: bool,
+    free_mobility: bool,
+) -> Result<Buf, String> {
+    let mut buf = decode_image(path, size)?;
+
+    if opaque_if_flat_alpha {
+        let max_a = buf.data.chunks_exact(4).map(|c| c[3]).max().unwrap_or(0);
+        // 8 rather than 0: a resized image picks up a little alpha along the
+        // edges even when the source had none, and that is not "has an alpha
+        // channel".
+        if max_a < 8 {
+            buf.data.chunks_exact_mut(4).for_each(|c| c[3] = 255);
+        }
+    }
+    if free_mobility {
+        buf.data.chunks_exact_mut(4).for_each(|c| c[2] = 255);
+    }
+    if invert_x || invert_y {
+        buf.data.chunks_exact_mut(4).for_each(|c| {
+            if invert_x {
+                c[0] = 255 - c[0];
+            }
+            if invert_y {
+                c[1] = 255 - c[1];
+            }
+        });
+    }
+    Ok(buf)
 }
 
 // ---------------------------------------------------------------------------
