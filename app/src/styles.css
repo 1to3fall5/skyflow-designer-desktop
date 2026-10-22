@@ -906,6 +906,10 @@ kbd {
 }
 .modal {
   width: 380px; max-width: calc(100vw - 32px);
+  /* The three repair notes make this tall — around 490px. On a short window
+     that would push the buttons off the bottom, where they cannot be pressed,
+     so the card scrolls instead of the dialog becoming unusable. */
+  max-height: calc(100vh - 40px); overflow-y: auto;
   background: var(--bg-2); border: 1px solid var(--line-2);
   border-radius: var(--r-lg); padding: 14px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, .6);
@@ -927,5 +931,9 @@ kbd {
    first line instead of beside the label's text. */
 .modal-row input[type=checkbox] { flex: none; margin: 2px 0 0; }
 .modal-note { display: block; color: var(--fg-dim); font-size: 11px; line-height: 1.45; margin-top: 2px; }
+/* Present but inert, never absent: a row that disappears when you tick
+   something moves everything under your pointer. Here it is the B-channel row,
+   which splitting implies rather than contradicts. */
+.modal-row.off { opacity: .5; cursor: default; }
 .modal-sep { height: 1px; background: var(--line); margin: 2px 0; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }

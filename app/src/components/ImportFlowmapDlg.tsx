@@ -13,6 +13,8 @@ export interface ImportOpts {
   opaqueIfFlatAlpha: boolean;
   /** B means mobility here and blue out there. */
   freeMobility: boolean;
+  /** Keep it: it becomes an obstacle layer instead of a number in the pixels. */
+  splitMobility: boolean;
   invertX: boolean;
   invertY: boolean;
 }
@@ -66,12 +68,31 @@ export default function ImportFlowmapDlg({ path, defaults, busy, onCancel, onOk 
           </span>
         </label>
 
-        <label className="modal-row">
-          <input type="checkbox" checked={o.freeMobility} onChange={toggle('freeMobility')} />
+        <label className={`modal-row${o.splitMobility ? ' off' : ''}`}>
+          <input
+            type="checkbox"
+            checked={o.freeMobility || o.splitMobility}
+            // Splitting implies it: once the obstacle has its own layer, the
+            // flow layer's B is free by definition.
+            disabled={o.splitMobility}
+            onChange={toggle('freeMobility')}
+          />
           <span>
             B 通道按「完全可流动」处理
             <span className="modal-note">
               这里的 B 是可流动度，不是蓝色。照抄文件里的值等于凭空画一片障碍。
+            </span>
+          </span>
+        </label>
+
+        <label className="modal-row">
+          <input type="checkbox" checked={o.splitMobility} onChange={toggle('splitMobility')} />
+          <span>
+            把 B 通道分离成障碍图层
+            <span className="modal-note">
+              可流动度反过来就是障碍遮罩（遮罩 = 255 − B）。留在流向图层的像素里它只是个
+              数字，擦不动也调不了；分离出来才是能改的障碍。默认关：多数外部 flowmap 的 B
+              不含障碍信息，分离出来是一层空的。
             </span>
           </span>
         </label>

@@ -445,7 +445,8 @@ export default function App() {
     try {
       // A new layer with its own pixels: structural, so it also refreshes the
       // arrow overlay and the layer thumbnails.
-      const snap = await api.importFlowmap(p, o.invertX, o.invertY, o.opaqueIfFlatAlpha, o.freeMobility);
+      const snap = await api.importFlowmap(p, o.invertX, o.invertY, o.opaqueIfFlatAlpha, o.freeMobility,
+        o.splitMobility);
       await structural(Promise.resolve(snap));
     } catch (e) {
       await message(`${e}\n\n支持：PNG / JPEG / BMP / TIFF / WEBP / TGA（含 RLE、16/24/32 位）`,
@@ -1669,7 +1670,7 @@ export default function App() {
           // The two repairs default to on: they are what a file from another
           // tool almost always needs. The inversions start from the export
           // settings, because the common case is reading back what was written.
-          defaults={{ opaqueIfFlatAlpha: true, freeMobility: true, invertX, invertY }}
+          defaults={{ opaqueIfFlatAlpha: true, freeMobility: true, splitMobility: false, invertX, invertY }}
           busy={busy}
           onCancel={() => setImportPath(null)}
           onOk={runImportFlowmap}

@@ -430,10 +430,14 @@ fn import_repairs_an_alpha_the_file_never_had() {
     let p = write_tmp("noalpha.png", &[]);
     io::export_png(&b, false, false, p.to_str().unwrap()).unwrap();
 
-    let kept = io::import_flowmap(p.to_str().unwrap(), 8, false, false, false, false).unwrap();
+    let kept = io::import_flowmap(p.to_str().unwrap(), 8, false, false, false, false, false)
+        .unwrap()
+        .flow;
     assert_eq!(kept.data[3], 0, "with the flag off, take the file at its word");
 
-    let fixed = io::import_flowmap(p.to_str().unwrap(), 8, false, false, true, false).unwrap();
+    let fixed = io::import_flowmap(p.to_str().unwrap(), 8, false, false, true, false, false)
+        .unwrap()
+        .flow;
     assert_eq!(fixed.data[3], 255, "a flat alpha means 'no opinion', not 'invisible'");
 }
 
@@ -445,10 +449,14 @@ fn import_frees_the_mobility_channel() {
     let p = write_tmp("mob.png", &[]);
     io::export_png(&b, false, false, p.to_str().unwrap()).unwrap();
 
-    let raw = io::import_flowmap(p.to_str().unwrap(), 8, false, false, false, false).unwrap();
+    let raw = io::import_flowmap(p.to_str().unwrap(), 8, false, false, false, false, false)
+        .unwrap()
+        .flow;
     assert_eq!(raw.data[2], 30, "with the flag off, keep what was stored");
 
-    let freed = io::import_flowmap(p.to_str().unwrap(), 8, false, false, false, true).unwrap();
+    let freed = io::import_flowmap(p.to_str().unwrap(), 8, false, false, false, true, false)
+        .unwrap()
+        .flow;
     assert_eq!(freed.data[2], 255, "mobility defaults to fully free");
     assert_eq!(&freed.data[..2], &[10, 20], "and the offsets are untouched");
 }
@@ -460,7 +468,9 @@ fn import_undoes_the_export_inversion() {
     let b = Buf::filled(8, 8, [10, 20, 30, 255]);
     let p = write_tmp("rtrip.png", &[]);
     io::export_png(&b, true, true, p.to_str().unwrap()).unwrap();
-    let back = io::import_flowmap(p.to_str().unwrap(), 8, true, true, false, false).unwrap();
+    let back = io::import_flowmap(p.to_str().unwrap(), 8, true, true, false, false, false)
+        .unwrap()
+        .flow;
     assert_eq!(&back.data[..3], &[10, 20, 30], "export inverted, import inverts back");
 }
 
@@ -472,7 +482,7 @@ fn importing_a_layer_is_one_undo_step() {
     let n = 32;
     let mut e = Engine::new(n);
     let before = e.layers.len();
-    let id = e.import_layer(Buf::filled(n, n, [128, 128, 255, 255]), "导入的图").unwrap();
+    let id = e.import_layer(Buf::filled(n, n, [128, 128, 255, 255]), None, "导入的图").unwrap();
     assert_eq!(e.layers.len(), before + 1);
     assert_eq!(e.active, id, "the imported layer becomes the active one");
     assert_eq!(e.layer(&id).unwrap().p.name, "导入的图");
@@ -484,6 +494,62 @@ fn importing_a_layer_is_one_undo_step() {
     );
     assert!(e.redo());
     assert!(e.layers.iter().any(|l| l.p.id == id), "and redo must bring it back");
+}
+
+#[test]
+fn import_can_split_the_mobility_channel_into_an_obstacle_mask() {
+    // Mobility and an obstacle mask are the same fact upside down: one obstacle
+    // layer at full opacity writes `B = 255 * (1 - a)`, so the mask that would
+    // have produced this B is `255 - B`.
+    //
+    // Splitting keeps the information. Baked into a paint layer's pixels it is
+    // not editable as an obstacle, which is the only thing you would want to do
+    // with it.
+    let mut b = Buf::filled(8, 8, [10, 20, 255, 255]);
+    b.data[2] = 0; // this one pixel does not flow at all
+    let p = write_tmp("split.png", &[]);
+    io::export_png(&b, false, false, p.to_str().unwrap()).unwrap();
+
+    let got = io::import_flowmap(p.to_str().unwrap(), 8, false, false, false, false, true).unwrap();
+    assert_eq!(got.flow.data[2], 255, "splitting frees the flow layer's B");
+    assert_eq!(&got.flow.data[..2], &[10, 20], "and leaves the offsets alone");
+    let m = got.obstacle.expect("splitting must produce a mask");
+    assert_eq!(m.data[3], 255, "B=0 is fully blocked");
+    assert_eq!(m.data[7], 0, "B=255 is no obstacle at all");
+}
+
+#[test]
+fn import_without_splitting_keeps_no_obstacle() {
+    let b = Buf::filled(8, 8, [10, 20, 30, 255]);
+    let p = write_tmp("nosplit.png", &[]);
+    io::export_png(&b, false, false, p.to_str().unwrap()).unwrap();
+    let got = io::import_flowmap(p.to_str().unwrap(), 8, false, false, false, false, false).unwrap();
+    assert!(got.obstacle.is_none(), "an obstacle layer is only made when asked for");
+}
+
+#[test]
+fn a_split_import_lands_two_layers_and_undo_takes_both() {
+    let n = 32;
+    let mut e = Engine::new(n);
+    let before = e.layers.len();
+    let mut mask = Buf::new(n, n);
+    mask.data.chunks_exact_mut(4).for_each(|c| c[3] = 128);
+    let id = e
+        .import_layer(Buf::filled(n, n, [128, 128, 255, 255]), Some(mask), "图")
+        .unwrap();
+    assert_eq!(e.layers.len(), before + 2, "a flow layer and an obstacle layer");
+
+    let obs = e.layers.iter().find(|l| l.p.kind == LayerKind::Obstacle).expect("an obstacle layer");
+    assert_eq!(obs.p.name, "图 障碍");
+    assert_eq!(obs.mask.as_ref().unwrap().data[3], 128);
+    // Above the flow it blocks: that is the direction the composite reads the
+    // stack in, and an obstacle under its own field would cover nothing.
+    let at_flow = e.layers.iter().position(|l| l.p.id == id).unwrap();
+    let at_obs = e.layers.iter().position(|l| l.p.id == obs.p.id).unwrap();
+    assert!(at_obs > at_flow, "the obstacle must sit above the flow");
+
+    assert!(e.undo());
+    assert_eq!(e.layers.len(), before, "one step: both layers go, not just one");
 }
 
 #[test]

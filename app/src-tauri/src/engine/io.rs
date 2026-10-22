@@ -265,9 +265,25 @@ pub fn export(
 ///   perfectly good layer you cannot see.
 /// * **`free_mobility`** — B means *mobility* here and *blue* out there. Leaving
 ///   whatever the file had in it would paint obstacles the author never drew.
+/// * **`split_mobility`** — the one that keeps the information instead of
+///   discarding it: the channel becomes a real obstacle layer on top, so it can
+///   be erased and retuned. Implies `free_mobility`.
 /// * **`invert_x` / `invert_y`** — the same `255 - c` the export applies, so a
 ///   file written with a flag set and read back with the same one is a round
 ///   trip. Both are involutions, which is why one flag serves both directions.
+/// What one file turned into.
+///
+/// `obstacle` is `Some` only when the caller asked for the mobility channel to
+/// be split out — it is a second layer, not a second field, because that is
+/// what makes it editable.
+pub struct ImportedPixels {
+    /// R/G offsets, A coverage. B is 255 unless the caller asked to keep
+    /// whatever the file had.
+    pub flow: Buf,
+    /// The mobility channel read as an obstacle mask.
+    pub obstacle: Option<Buf>,
+}
+
 pub fn import_flowmap(
     path: &str,
     size: usize,
@@ -275,7 +291,8 @@ pub fn import_flowmap(
     invert_y: bool,
     opaque_if_flat_alpha: bool,
     free_mobility: bool,
-) -> Result<Buf, String> {
+    split_mobility: bool,
+) -> Result<ImportedPixels, String> {
     let mut buf = decode_image(path, size)?;
 
     if opaque_if_flat_alpha {
@@ -287,9 +304,28 @@ pub fn import_flowmap(
             buf.data.chunks_exact_mut(4).for_each(|c| c[3] = 255);
         }
     }
-    if free_mobility {
+
+    // B is mobility, and an obstacle mask is the same fact upside down: the
+    // composite writes `B = 255 * (1 - a)` for one obstacle layer at full
+    // opacity, so the mask that would have produced this B is `255 - B`.
+    //
+    // Splitting it out is not just tidier than leaving it in the flow layer —
+    // mobility baked into a paint layer's pixels is not editable as an
+    // obstacle, which is the one thing you would want to do with it.
+    let mut obstacle = None;
+    if split_mobility {
+        let mut m = Buf::new(buf.w, buf.h);
+        for (o, i) in m.data.chunks_exact_mut(4).zip(buf.data.chunks_exact(4)) {
+            o[3] = 255 - i[2];
+        }
+        obstacle = Some(m);
+        // The flow layer's own B is free now — the obstacle has its own layer,
+        // which is exactly what `free_mobility` means. So splitting implies it.
+        buf.data.chunks_exact_mut(4).for_each(|c| c[2] = 255);
+    } else if free_mobility {
         buf.data.chunks_exact_mut(4).for_each(|c| c[2] = 255);
     }
+
     if invert_x || invert_y {
         buf.data.chunks_exact_mut(4).for_each(|c| {
             if invert_x {
@@ -300,7 +336,7 @@ pub fn import_flowmap(
             }
         });
     }
-    Ok(buf)
+    Ok(ImportedPixels { flow: buf, obstacle })
 }
 
 // ---------------------------------------------------------------------------

@@ -1846,7 +1846,7 @@ describe('导入 Flowmap: a file from somewhere else is the wrong conventions, n
   it('offers the two repairs instead of deciding them in the engine', () => {
     // Both default on: they are what a file from another tool almost always
     // needs, and neither can be inferred from the pixels.
-    expect(src).toMatch(/defaults=\{\{ opaqueIfFlatAlpha: true, freeMobility: true, invertX, invertY \}\}/);
+    expect(src).toMatch(/defaults=\{\{ opaqueIfFlatAlpha: true, freeMobility: true, splitMobility: false, invertX, invertY \}\}/);
     expect(rawDlg).toMatch(/没有 alpha 就当作不透明/);
     expect(rawDlg).toMatch(/B 通道按「完全可流动」处理/);
   });
@@ -1869,10 +1869,23 @@ describe('导入 Flowmap: a file from somewhere else is the wrong conventions, n
     expect(rawIo).toMatch(/buf\.data\.chunks_exact_mut\(4\)\.for_each\(\|c\| c\[2\] = 255\)/);
   });
 
+  it('can keep the mobility channel as an obstacle layer instead of a number', () => {
+    // Mobility and an obstacle mask are the same fact upside down, so this is
+    // not a conversion — it is the difference between importing the
+    // information and importing a picture of it.
+    expect(rawDlg).toMatch(/把 B 通道分离成障碍图层/);
+    expect(rawIo).toMatch(/o\[3\] = 255 - i\[2\]/);
+    // Splitting implies the flow layer's own B is free, and the row says so
+    // rather than silently disagreeing with the tick above it.
+    expect(rawDlg).toMatch(/checked=\{o\.freeMobility \|\| o\.splitMobility\}/);
+    expect(rawDlg).toMatch(/disabled=\{o\.splitMobility\}/);
+    expect(rawStyles).toMatch(/\.modal-row\.off \{/);
+  });
+
   it('is one undo step, which means the layer has to leave the stack again', () => {
     // A structural entry with no snapshot and an order that lacks the layer —
     // `restore` rebuilds from `order` and drops what is left over.
-    expect(rawEngine).toMatch(/pub fn import_layer\(&mut self, buf: Buf, name: &str\)/);
+    expect(rawEngine).toMatch(/pub fn import_layer\(&mut self, buf: Buf, mask: Option<Buf>, name: &str\)/);
     expect(rawEngine).toMatch(/self\.push_history\(Vec::new\(\), Some\(order_before\)\)/);
   });
 });

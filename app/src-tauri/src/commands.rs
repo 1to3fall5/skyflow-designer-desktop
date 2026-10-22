@@ -131,6 +131,11 @@ pub struct ImportReq {
     pub opaque_if_flat_alpha: bool,
     /// B means mobility here and blue out there; overwrite it with 255.
     pub free_mobility: bool,
+    /// Keep the mobility channel rather than overwriting it: it becomes an
+    /// obstacle layer of its own, so it can be erased and retuned afterwards.
+    /// Implies `free_mobility` on the flow layer.
+    #[serde(default)]
+    pub split_mobility: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -510,15 +515,17 @@ pub fn import_flowmap(req: ImportReq, state: State<AppState>) -> Result<Snapshot
         .and_then(|s| s.to_str())
         .unwrap_or("导入的 Flowmap")
         .to_string();
-    let buf = io::import_flowmap(
+    let got = io::import_flowmap(
         &req.path,
         size,
         req.invert_x,
         req.invert_y,
         req.opaque_if_flat_alpha,
         req.free_mobility,
+        req.split_mobility,
     )?;
-    e.import_layer(buf, &name).ok_or("导入的尺寸与画布不符")?;
+    e.import_layer(got.flow, got.obstacle, &name)
+        .ok_or("导入的尺寸与画布不符")?;
     drop(e);
     Ok(emit(&state))
 }
