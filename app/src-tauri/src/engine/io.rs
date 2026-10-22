@@ -642,6 +642,12 @@ pub fn load_project(path: &str) -> Result<Engine, String> {
     } else {
         engine.layers[engine.layers.len() - 1].p.id.clone()
     };
+    // Ids are minted from a counter this file does not carry, so take it from
+    // the ids that are here — and then make sure they are actually distinct.
+    // A file saved before that was guaranteed can carry a collision, and
+    // loading it has to come out with a stack that can be addressed at all.
+    engine.sync_id_counter();
+    engine.dedupe_ids();
     engine.projection = match proj.projection {
         1 => super::ops::Projection::Polar,
         2 => super::ops::Projection::Planar,

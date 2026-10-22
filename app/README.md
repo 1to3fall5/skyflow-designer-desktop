@@ -817,7 +817,7 @@ npx tauri build        # 产出 NSIS / MSI 安装包，约 3 分钟
 ## 测试
 
 ```bash
-npm test          # 前端 368 + Rust 128，共 496 个用例
+npm test          # 前端 368 + Rust 130，共 498 个用例
 npm run test:fe   # 仅前端（vitest）
 npm run test:rust # 仅引擎（cargo test）
 npm run test:watch

@@ -265,6 +265,63 @@ impl Engine {
         self.layers.iter().find(|l| l.p.id == id)
     }
 
+    /// An id no layer is already using.
+    ///
+    /// The counter alone cannot guarantee that: it was never written into the
+    /// project file, so reopening one started minting at 2 again and handed a
+    /// fresh layer an id some loaded layer already had. Every address-by-id
+    /// path takes the *first* match, so from that moment editing the new layer
+    /// edited the old one — "点眼睛，操作的却是另一个流向图层". Skipping taken
+    /// ids makes the collision impossible rather than merely unlikely, and it
+    /// needs no format change, so files saved by the broken build still open.
+    fn mint_id(&mut self, kind: &LayerKind) -> String {
+        loop {
+            self.id_counter += 1;
+            let id = format!("{}-{}", kind_name(kind), self.id_counter);
+            if !self.layers.iter().any(|l| l.p.id == id) {
+                return id;
+            }
+        }
+    }
+
+    /// Re-derive the counter from the ids already in the stack, so a reopened
+    /// project keeps counting where it left off instead of starting over.
+    pub fn sync_id_counter(&mut self) {
+        for l in &self.layers {
+            let n = l.p.id.rsplit('-').next().and_then(|s| s.parse::<u64>().ok());
+            if let Some(n) = n {
+                if n > self.id_counter {
+                    self.id_counter = n;
+                }
+            }
+        }
+    }
+
+    /// Give every layer an id of its own, remapping `active` if the layer it
+    /// pointed at is one of the ones that had to be renamed.
+    ///
+    /// Files saved before `mint_id` existed can already contain the collision,
+    /// and opening one has to come out usable — otherwise the only way forward
+    /// is to start the project over.
+    pub fn dedupe_ids(&mut self) {
+        let mut seen = std::collections::HashSet::new();
+        let mut dupes: Vec<usize> = Vec::new();
+        for (i, l) in self.layers.iter().enumerate() {
+            if !seen.insert(l.p.id.clone()) {
+                dupes.push(i);
+            }
+        }
+        for i in dupes {
+            let old = self.layers[i].p.id.clone();
+            let kind = self.layers[i].p.kind.clone();
+            let fresh = self.mint_id(&kind);
+            self.layers[i].p.id = fresh.clone();
+            if self.active == old {
+                self.active = fresh;
+            }
+        }
+    }
+
     /// A small stand-in for one layer, for the 图层 panel's thumbnail column.
     ///
     /// It shows the layer's **own** pixels, not its contribution to the
@@ -307,8 +364,7 @@ impl Engine {
     // -- layer management ----------------------------------------------------
 
     pub fn add_layer(&mut self, kind: LayerKind) -> String {
-        self.id_counter += 1;
-        let id = format!("{}-{}", kind_name(&kind), self.id_counter);
+        let id = self.mint_id(&kind);
         let count = self.layers.iter().filter(|l| l.p.kind == kind).count();
         let name = match kind {
             LayerKind::Paint => format!("流向 {}", count + 1),

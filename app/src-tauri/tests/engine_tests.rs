@@ -2847,3 +2847,80 @@ fn the_obstacle_thumbnail_follows_coverage() {
     assert!(alpha < 140, "a 30% dab must not be shown as solid: {alpha}");
     assert!(alpha > 20, "and not as empty either: {alpha}");
 }
+
+/// Every id in the stack, in stack order.
+fn ids(e: &Engine) -> Vec<String> {
+    e.layers.iter().map(|l| l.p.id.clone()).collect()
+}
+
+fn assert_unique(e: &Engine, what: &str) {
+    let all = ids(e);
+    let mut seen = std::collections::HashSet::new();
+    for id in &all {
+        assert!(seen.insert(id.clone()), "{what}: duplicate id {id} in {all:?}");
+    }
+}
+
+#[test]
+fn a_layer_added_after_reopening_a_project_does_not_reuse_an_id() {
+    // The counter that mints ids was never written into the project file, so
+    // reopening started it back at 1 — and the next layer came out with an id
+    // some loaded layer already had. Everything in the app addresses a layer
+    // by its id (`layer_mut`, the row's `data-lid`, React's key, `active`),
+    // and all of them take the *first* match: from then on, editing the new
+    // layer edits the old one. That is exactly "点眼睛，操作的却是另一个
+    // 流向图层" — after 导入 Flowmap, which is what puts two extra layers
+    // (hence counter 2 and 3) into the file.
+    let n = 32;
+    let mut e = Engine::new(n);
+    e.import_layer(Buf::filled(n, n, [128, 128, 255, 255]), Some(Buf::filled(n, n, [128, 128, 255, 255])), "图")
+        .expect("import");
+    assert_unique(&e, "before save");
+
+    let path = write_tmp("ids.skyflow", &[]);
+    io::save_project(&e, path.to_str().unwrap()).expect("save");
+
+    let mut e = io::load_project(path.to_str().unwrap()).expect("load");
+    assert_unique(&e, "right after load");
+
+    let fresh = e.add_layer(LayerKind::Paint);
+    assert_unique(&e, "after adding one layer");
+    // ...and the new layer has to be the one that is now addressable by it.
+    assert_eq!(
+        e.layer(&fresh).unwrap().p.name,
+        e.layers[e.layers.len() - 1].p.name,
+        "the fresh id must resolve to the fresh layer, not to an older twin"
+    );
+
+    // Several more, because one collision averted by luck is not the property.
+    for _ in 0..4 {
+        e.add_layer(LayerKind::Paint);
+        assert_unique(&e, "after adding more layers");
+    }
+}
+
+#[test]
+fn a_project_that_already_contains_a_duplicate_id_is_healed_on_load() {
+    // Files saved by the build with the bug are out there and contain the
+    // collision. Loading one has to come out with distinct ids, or the app is
+    // broken for the user until they start over.
+    let n = 32;
+    let mut e = Engine::new(n);
+    e.import_layer(Buf::filled(n, n, [128, 128, 255, 255]), None, "图").expect("import");
+    // Force the collision the old build produced: two layers, one id.
+    let victim = e.layers[e.layers.len() - 1].p.id.clone();
+    e.add_layer(LayerKind::Paint);
+    e.layers.last_mut().unwrap().p.id = victim.clone();
+    assert_eq!(ids(&e).iter().filter(|i| **i == victim).count(), 2, "fixture: the id is duplicated");
+
+    let path = write_tmp("dup.skyflow", &[]);
+    io::save_project(&e, path.to_str().unwrap()).expect("save");
+
+    let loaded = io::load_project(path.to_str().unwrap()).expect("load");
+    assert_unique(&loaded, "after loading a file that has the collision");
+    assert_eq!(
+        loaded.layers.len(),
+        e.layers.len(),
+        "healing must not drop a layer"
+    );
+}
